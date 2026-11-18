@@ -28,9 +28,14 @@ also outside this benchmark: fixtures supply the unchanged full-event landmarks.
   a table mapping cluster labels to original seed hit IDs.
 
 The PL selector implements the greedy rule without materializing a sorted list:
-a seven-stage maximum tree selects the best unsuppressed candidate, then 128
-parallel separation lanes suppress its close neighbors. Each lane processes two
-coordinates per clock through subtraction, square, and accumulation stages. AIE
+128 parallel separation lanes first prepare a 128 x 128-bit proximity table
+while AIE computes densities. Preparation starts at the same input-release edge
+as the timer and takes 896 PL clocks (seven clocks per row). Each lane processes
+two coordinates per clock through subtraction, square, and accumulation stages.
+The seven-stage maximum tree then selects the best unsuppressed candidate; a
+synchronous table read supplies its suppression mask on the next clock. Selection
+waits for the current event table if densities arrive early. Every row is
+overwritten each event, and no precomputation is moved outside the timer. AIE
 uses native 32-bit vector shuffles and fused minimum/compare operations on four
 hits at a time. The 1–3 seed cases are unrolled; the larger seed loop is pipelined.
 Code generation checks require spill-free assignment loops of at most 12 issue
@@ -43,7 +48,7 @@ Normal clustering remains the default. Writing `1` to register `0x0040` while
 idle enables a stress mode that selects exactly 64 distinct landmarks in density
 rank order, with the same original-hit-ID tie rule. It bypasses the density
 cutoff and separation rejection, while retaining all 64 selection iterations
-and their actual separation-distance calculations. No seeds are preselected on
+and the complete 128-row separation-table preparation. No seeds are preselected on
 the host. The mode is latched for selection and cannot be changed while busy.
 All 32 AIE tiles receive the same 64 IDs and assign their 20 hits against them.
 
@@ -83,7 +88,8 @@ make -f array/Makefile emu pl-trace
 make -f array/Makefile emu pl-trace SEED_MODE=force64
 ```
 
-The selector test covers normal/forced transitions, all 64 separation passes,
+The selector test covers normal/forced transitions, all 128 exact mask rows,
+density arriving before/after table readiness,
 threshold equality, density ties, signed endpoints,
 duplicate landmarks, zero densities, 64-seed saturation, and repeated events.
 The RTL system test checks independent backpressure, skew, reverse tile return

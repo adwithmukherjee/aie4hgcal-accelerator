@@ -30,10 +30,11 @@ module array_control #(parameter COLUMNS=4) (
  wire [COLUMNS*8192-1:0] landmarks;
  wire [COLUMNS*1280-1:0] labels;
  wire [4095:0] final_counts;
+ wire start;
  generate for(genvar d=0;d<128;d=d+1) begin: export_density
   assign final_counts[d*32+:32]=density_sum[d];
  end endgenerate
- seed_select select_seeds(.clk(ap_clk),.rst_n(ap_rst_n),.start(seed_start),
+ seed_select select_seeds(.clk(ap_clk),.rst_n(ap_rst_n),.prepare(start),.start(seed_start),
   .force_64(force_64),
   .densities(final_counts),.landmarks(landmarks[0+:8192]),.landmark_hit_ids(landmark_hit_ids),
   .done(seeds_done),.overflow(seed_overflow),.seed_count(seed_count),.seed_slots(seed_slots),.seed_hit_ids(seed_hit_ids));
@@ -48,7 +49,7 @@ module array_control #(parameter COLUMNS=4) (
  reg [31:0] write_data;
  reg [3:0] write_strobes;
  wire write_commit=aw_pending && w_pending && !s_axi_control_bvalid;
- wire start=write_commit && aw_address==0 && write_strobes==4'hf && write_data==1 && !busy && (&inputs_loaded) && (&ids_loaded);
+ assign start=write_commit && aw_address==0 && write_strobes==4'hf && write_data==1 && !busy && (&inputs_loaded) && (&ids_loaded);
  assign s_axi_control_awready=!aw_pending && !s_axi_control_bvalid;
  assign s_axi_control_wready=!w_pending && !s_axi_control_bvalid;
  assign s_axi_control_arready=!s_axi_control_rvalid;

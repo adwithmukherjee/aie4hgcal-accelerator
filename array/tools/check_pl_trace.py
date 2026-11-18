@@ -28,10 +28,15 @@ def sample(timestamp,changes):
     old=state.copy();state.update(changes)
     if state.get('release_strobe')==1 and old.get('release_strobe')!=1:
         assert state.get('force_64')==int(force_64),'Hardware seed mode differs from requested benchmark'
+        assert state.get('preparing')==1 and state.get('masks_ready')==0,'Mask preparation must start at the timer boundary'
         assert state.get('tx_valid')==(1<<columns)-1,'Column transmitters were not released together'
         current=dict(release_ps=timestamp,lanes=[dict(input=[],output=[],partial_input=[],partial_output=[]) for _ in range(columns)])
         measured.append(current)
     if current is None:return
+    if state.get('masks_ready')==1 and old.get('masks_ready')!=1:
+        current['mask_ready_ps']=timestamp
+    if state.get('density_done')==1 and old.get('density_done')!=1:
+        assert state.get('masks_ready')==1,'Geometry preparation was not hidden by density computation'
     assert not state.get('fault') and not state.get('column_fault'),'PL protocol fault'
     if old.get('release_strobe')==1 and state.get('release_strobe')==0:
         current['period_ps']=timestamp-current['release_ps']
@@ -145,7 +150,7 @@ for index,(observed,host,identity) in enumerate(zip(measured,host_report['events
         seed_hit_ids=expected['seed_hit_ids'],seed_overflow=expected['seed_overflow']))
 clock=json.loads((build/'system/clock_evidence.json').read_text())
 summary=dict(status='passed',measurement='Integrated hardware emulation',columns=columns,tiles=tiles,hits=tiles*20,
-    seed_mode=host_report['seed_mode'],separation_calculations_retained=True,
+    seed_mode=host_report['seed_mode'],separation_calculations_retained=True,separation_masks_precomputed_within_density=True,
     landmarks=128,radius_squared=645,start='Release raw resident PL embeddings',
     finish='Final hit label stored in original order in PL',pl_measured_hz=1e12/period,
     aie_hz=clock['aie_hz'],pl_period_ps=period,events=events,
