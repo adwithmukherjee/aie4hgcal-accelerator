@@ -13,7 +13,7 @@ public:
     adf::input_plio input[ARRAY_COLUMNS];
     adf::output_plio output[ARRAY_COLUMNS];
     adf::kernel worker[8*ARRAY_COLUMNS];
-    adf::pktsplit<17> ingress[ARRAY_COLUMNS];
+    adf::pktsplit<10> ingress[ARRAY_COLUMNS];
     adf::pktmerge<8> egress[ARRAY_COLUMNS];
     ArrayGraph() {
         for (unsigned c=0;c<ARRAY_COLUMNS;++c) {
@@ -22,7 +22,7 @@ public:
             output[c]=adf::output_plio::create("array_output_"+index,adf::plio_128_bits,"output-"+index+".txt",300);
             adf::location<adf::PLIO>(input[c])=adf::shim(24+c,0);
             adf::location<adf::PLIO>(output[c])=adf::shim(24+c,0);
-            ingress[c]=adf::pktsplit<17>::create();
+            ingress[c]=adf::pktsplit<10>::create();
             egress[c]=adf::pktmerge<8>::create();
             adf::connect<adf::pktstream>(input[c].out[0],ingress[c].in[0]);
             adf::connect<adf::pktstream>(egress[c].out[0],output[c].in[0]);
@@ -38,7 +38,7 @@ public:
                 adf::location<adf::buffer>(worker[i].in[1])=adf::address(24+c,r,0x6100);
                 adf::connect<adf::pktstream,adf::window<160>>(ingress[c].out[r],worker[i].in[0]);
                 adf::connect<adf::pktstream,adf::window<1024>>(ingress[c].out[8],worker[i].in[1]);
-                adf::connect<adf::pktstream>(ingress[c].out[9+r],worker[i].in[2]);
+                adf::connect<adf::pktstream>(ingress[c].out[9],worker[i].in[2]);
                 adf::connect<adf::pktstream>(worker[i].out[0],egress[c].in[r]);
             }
         }

@@ -24,7 +24,8 @@ module array_tb;
  .tx_data(txdata),.tx_keep(txkeep),.tx_last(txlast),.tx_valid(txvalid),.tx_ready(txready),
  .rx_data(rxdata),.rx_keep(rxkeep),.rx_last(rxlast),.rx_valid(rxvalid),.rx_ready(rxready));
  reg [31:0] frames[0:6143],golden[0:331775],sums[0:127],column_sums[0:C*128-1];
- reg [31:0] headers[0:C*17-1];
+ reg [31:0] headers[0:C*10-1];
+ reg [31:0] expected_cluster[0:1479],landmark_ids[0:511];
  integer current_frame=0,tick=0;
  integer phase[0:C-1],tx_row[0:C-1],packet_word[0:C-1],controls[0:C-1];
  reg [C-1:0] inputs_done=0,held=0;
@@ -63,16 +64,16 @@ module array_tb;
   for(integer col=0;col<C;col=col+1) begin phase[col]=0;tx_row[col]=0;packet_word[col]=0;controls[col]=0;end
  end
  always @(dut.column_density_done) if(&dut.column_density_done) last_column_time=$time;
+ always @(posedge dut.cluster_done) finish_time=$time;
  always @(posedge dut.density_done) begin
-  finish_time=$time;
-  if((finish_time-last_column_time)!==(C==4?20:10)) $fatal(1,"Wrong reduction pipeline depth");
+  if(($time-last_column_time)!==(C==4?20:10)) $fatal(1,"Wrong reduction pipeline depth");
  end
  always @(negedge clk) for(integer col=0;col<C;col=col+1)
   txready[col]=((tick+col*2)%7!=1 && (tick+col*2)%7!=2);
  always @(posedge clk) if(resetn) begin: monitor
   integer count,offset,length,route;
   tick=tick+1;
-  if(dut.density_done && !(&dut.column_density_done)) $fatal(1,"Global timer ended before all columns");
+  if(dut.cluster_done && !(&dut.column_labels_done)) $fatal(1,"Global timer ended before all columns");
   for(integer col=0;col<C;col=col+1) begin
    if(held[col] && (!txvalid[col] || {txlast[col],txkeep[col*16+:16],txdata[col*128+:128]}!==held_beat[col]))
     $fatal(1,"Column %0d TX changed under backpressure",col);
@@ -82,14 +83,18 @@ module array_tb;
     case(phase[col])
      0:begin length=257;route=8;end
      1:begin length=41;route=tx_row[col];end
-     2:begin length=1;route=9+tx_row[col];end
+     2:begin length=2+((expected_cluster[current_frame*370+128]+3)/4);route=9;end
      default:$fatal(1,"Unexpected extra packet");
     endcase
-    if(phase[col]==2 && !dut.density_done) $fatal(1,"Readback inside global timing window");
+    if(phase[col]==2 && !dut.seeds_done) $fatal(1,"Seed packet before selection");
     for(integer k=0;k<4;k=k+1) begin
      if(txkeep[col*16+k*4+:4]==15) begin
       if(packet_word[col]+count==0) begin
-       if(txdata[col*128+k*32+:32]!==headers[col*17+route]) $fatal(1,"Wrong column packet header");
+       if(txdata[col*128+k*32+:32]!==headers[col*10+route]) $fatal(1,"Wrong column packet header");
+      end else if(phase[col]==2) begin
+       if(packet_word[col]+count==1) begin
+        if(txdata[col*128+k*32+:32]!==expected_cluster[current_frame*370+128]) $fatal(1,"Wrong seed count broadcast");
+       end else if(txdata[col*128+k*32+:32]!==expected_cluster[current_frame*370+130+packet_word[col]+count-2]) $fatal(1,"Wrong seed ID broadcast");
       end else begin
        offset=(phase[col]==0?1280:col*320+tx_row[col]*40)+packet_word[col]+count-1;
        if(txdata[col*128+k*32+:32]!==frames[current_frame*1536+offset]) $fatal(1,"Wrong distinct hit/common landmark payload");
@@ -108,7 +113,7 @@ module array_tb;
       else tx_row[col]=tx_row[col]+1;
      end else begin
       controls[col]=controls[col]+1;
-      if(tx_row[col]==7) phase[col]=3;else tx_row[col]=tx_row[col]+1;
+      phase[col]=3;
      end
     end
    end
@@ -118,12 +123,12 @@ module array_tb;
  integer length,count,offset,base;
  reg [127:0] beat;reg [15:0] keep;
  begin
-  length=(kind==0?33:2561);base=(current_frame*32+col*8+row)*2592+(kind==0?0:32);
+  length=(kind==0?33:6);base=(kind==0?(current_frame*32+col*8+row)*2592:current_frame*370+210+(col*8+row)*5);
   for(offset=0;offset<length;offset=offset+4) begin
    beat=0;keep=0;count=0;
    for(integer k=0;k<4;k=k+1) if(offset+k<length) begin
     keep[k*4+:4]=15;count=count+1;
-    beat[k*32+:32]=(offset+k==0?header(output_id(col,row),kind):golden[base+offset+k-1]);
+    beat[k*32+:32]=(offset+k==0?header(output_id(col,row),kind):(kind==0?golden[base+offset+k-1]:expected_cluster[base+offset+k-1]));
    end
    if(offset%28==0) repeat(3+col) @(negedge clk);
    @(negedge clk);rxdata[col*128+:128]=beat;rxkeep[col*16+:16]=keep;
@@ -138,9 +143,9 @@ module array_tb;
    @(negedge clk);wait(inputs_done[col]);
    repeat(17+col*43) @(negedge clk);
    for(integer row=7;row>=0;row=row-1) send_packet(col,row,0);
-   wait(controls[col]==8);
+   wait(controls[col]==1);
    repeat(37+col*11) @(negedge clk);
-   for(integer row=0;row<8;row=row+1) send_packet(col,row,1);
+   for(integer row=0;row<8;row=row+1) send_packet(col,row,2);
   end
  end endgenerate
  reg [31:0] value,timed_cycles;
@@ -149,13 +154,15 @@ module array_tb;
   if(!$value$plusargs("DATA=%s",path)) $fatal(1,"DATA required");
   $sformat(input_path,"%0s/payloads.mem",path);$sformat(expected_path,"%0s/expected.mem",path);
   $readmemh(input_path,frames);$readmemh(expected_path,golden);
+  $sformat(expected_path,"%0s/cluster_expected.mem",path);$readmemh(expected_path,expected_cluster);
+  $sformat(expected_path,"%0s/landmark_ids.mem",path);$readmemh(expected_path,landmark_ids);
   for(integer j=0;j<6144;j=j+1) if(^frames[j]===1'bx) $fatal(1,"Missing input word");
   for(integer j=0;j<331776;j=j+1) if(^golden[j]===1'bx) $fatal(1,"Missing reference word");
   repeat(5) @(negedge clk);resetn=1;write_reg(0,1,1);
   for(integer col=0;col<C;col=col+1) begin
-   for(integer j=0;j<17;j=j+1) begin
-    headers[col*17+j]=header((j*7+3+col)%32,j>=9?2:0);
-    write_reg(16'h440+col*256+j*4,headers[col*17+j]);
+   for(integer j=0;j<10;j=j+1) begin
+    headers[col*10+j]=header((j*7+3+col)%32,j>=9?2:0);
+    write_reg(16'h440+col*256+j*4,headers[col*10+j]);
    end
    for(integer j=0;j<8;j=j+1) write_reg(16'h4a0+col*256+j*4,output_id(col,j));
   end
@@ -177,10 +184,11 @@ module array_tb;
      wstrb=15;
     end
    end
+   for(integer j=0;j<128;j=j+1) write_reg(16'h3000+j*4,landmark_ids[current_frame*128+j]);
    write_reg(0,1,1);if(dut.busy) $fatal(1,"Partially loaded array released");
    write_reg(16'h8000+(C-1)*4096+575*4,frames[current_frame*1536+1535]);
    write_reg(0,1);write_reg(16'h8000,32'hbadbad00,1);
-   wait(dut.density_done);
+   wait(dut.cluster_done);
    read_reg(16'h10,timed_cycles);
    if(timed_cycles!==(finish_time-release_time)/10) $fatal(1,"Global counter endpoint mismatch");
    for(integer j=0;j<128;j=j+1) begin
@@ -190,24 +198,25 @@ module array_tb;
      if(value!==column_sums[col*128+j]) $fatal(1,"Column sum mismatch");
     end
    end
-   wait(dut.readback_done);
-   read_reg(4,value);if(value!==14) $fatal(1,"Completion/load-guard status mismatch");
+   read_reg(4,value);if(value!==62) $fatal(1,"Completion/load-guard status mismatch: %h",value);
+   read_reg(16'h3c,value);if(value!==expected_cluster[current_frame*370+128]) $fatal(1,"Seed metadata mismatch");
+   for(integer j=0;j<16;j=j+1) begin
+    read_reg(16'h2400+j*4,value);if(value!==expected_cluster[current_frame*370+130+j]) $fatal(1,"Seed slots mismatch");
+   end
+   for(integer j=0;j<64;j=j+1) begin
+    read_reg(16'h2500+j*4,value);if(value!==expected_cluster[current_frame*370+146+j]) $fatal(1,"Seed hit identities mismatch");
+   end
+   for(integer j=0;j<160;j=j+1) begin
+    read_reg(16'h1000+j*4,value);if(value!==expected_cluster[current_frame*370+210+j]) $fatal(1,"Original-order label mismatch");
+   end
    for(integer col=0;col<C;col=col+1) begin
-    read_reg(16'h400+col*256,value);if(value!==161) $fatal(1,"Column TX beat count");
-    read_reg(16'h404+col*256,value);if(value!==5200) $fatal(1,"Column RX beat count");
-    for(integer row=0;row<8;row=row+1) begin
-     write_reg(16'h3c,col*8+row);
-     read_reg(16'h3c,value);if(value!==col*8+row) $fatal(1,"Matrix selector mismatch");
-     for(integer j=0;j<2560;j=j+1) begin
-      read_reg(16'hc000+j*4,value);
-      if(value!==golden[(current_frame*32+col*8+row)*2592+32+j]) $fatal(1,"Matrix readback mismatch");
-     end
-    end
+    read_reg(16'h400+col*256,value);if(value!==154) $fatal(1,"Column TX beat count");
+    read_reg(16'h404+col*256,value);if(value!==88) $fatal(1,"Column RX beat count");
    end
    read_reg(16'h10,value);if(value!==timed_cycles) $fatal(1,"Timer changed during readback");
    $display("PASS array RTL: %0d columns, fixture %0d",C,trial);
   end
-  $display("PASS: independent columns and global PL reduction, skew, reverse tile order, backpressure, matrix storage, load guards and exact timer boundaries");
+  $display("PASS: four-column clustering, seeds, identity table, labels, skew, reverse tile order, backpressure, load guards and exact timer boundaries");
   $finish;
  end
  initial begin #100000000;$fatal(1,"Testbench timeout");end

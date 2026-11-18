@@ -2,7 +2,7 @@ set src [file normalize [lindex $argv 0]]
 set build [file normalize [lindex $argv 1]]
 set columns [lindex $argv 2]
 create_project array_pack ./project -part xcvc1902-vsvd1760-2MP-e-S -force
-add_files [list $src/array/column_lane.sv $src/array/control.sv $build/config/array_pl.sv]
+add_files [list $src/array/seed_select.sv $src/array/column_lane.sv $src/array/control.sv $build/config/array_pl.sv]
 set_property top array_pl [current_fileset]
 update_compile_order -fileset sources_1
 ipx::package_project -root_dir ./ip -vendor hgcal.org -library benchmark -taxonomy /KernelIP -import_files

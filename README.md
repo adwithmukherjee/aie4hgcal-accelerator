@@ -2,7 +2,9 @@
 
 The [one-column benchmark](column/README.md) extends this implementation to
 1, 2, 4 and 8 workers with shared packet transport and PL density accumulation.
-The [parallel-column benchmark](array/README.md) adds two and four full columns,
+The [four-column clustering benchmark](array/README.md) extends density through seed selection and cached hit assignment. The earlier density-only two/four-column benchmark is preserved at commit `01628a1`.
+
+The density baseline uses two and four full columns,
 independent streams, and a timed final PL reduction across columns.
 
 For 20 hits and 128 landmarks, each an 8D signed INT8 embedding, compute all

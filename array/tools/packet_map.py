@@ -14,10 +14,10 @@ def packet_header(identifier,kind=0):
  return value|((1^(bin(value).count('1')&1))<<31)
 lanes=[];all_headers=[];all_ids=[]
 for c in range(experiment['columns']):
- incoming=ids(f'array_input_{c}',17);outgoing=ids(f'array_output_{c}',8)
- registers=[packet_header(x,2 if i>=9 else 0) for i,x in enumerate(incoming)]
+ incoming=ids(f'array_input_{c}',10);outgoing=ids(f'array_output_{c}',8)
+ registers=[packet_header(x,2 if i==9 else 0) for i,x in enumerate(incoming)]
  lanes.append(dict(index=c,physical_column=24+c,hit_ids=incoming[:8],landmark_id=incoming[8],
-                   readback_ids=incoming[9:],output_ids=outgoing,route_headers=registers))
+                   seed_id=incoming[9],output_ids=outgoing,route_headers=registers))
  all_headers+=registers;all_ids+=outgoing
 report=dict(**experiment,lanes=lanes,timed_input_beats_per_column=153,
             density_beats_per_column=72,timed_input_packet_bytes_per_column=2340,

@@ -1,8 +1,8 @@
-"""Check parallel traffic, CPU results and the global reduction timer endpoint."""
+"""Check parallel traffic, CPU results and the final-label timer endpoint."""
 import json,re,statistics,struct,sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'tools'))
-from reference import reference
+from clustering_reference import reference,squared
 
 data,build=map(Path,sys.argv[1:3])
 results=build/'system/results'
@@ -48,17 +48,17 @@ def sample(timestamp,changes):
             assert part(state,'tile_density_masks',col,8)==255
             assert part(state,'rx_beats',col,32)==72
             lane['finish_ps']=timestamp
-    if state.get('density_done')==1 and old.get('density_done')!=1:
-        assert state['column_density_done']==(1<<columns)-1
+    if state.get('cluster_done')==1 and old.get('cluster_done')!=1:
+        assert state['column_labels_done']==(1<<columns)-1
         current['finish_ps']=timestamp;current['cycles']=state['elapsed_cycles']
-    if state.get('density_done')==1:
-        assert state['elapsed_cycles']==current['cycles'],'Timer changed after global reduction'
-    if state.get('readback_done')==1:
-        current['readback_complete']=True
-        assert state['column_readback_done']==(1<<columns)-1
+    if state.get('cluster_done')==1:
+        assert state['elapsed_cycles']==current['cycles'],'Timer changed after final label storage'
+    if state.get('cluster_done')==1:
+        current['complete']=True
+        assert state['column_labels_done']==(1<<columns)-1
         for col in range(columns):
-            assert part(state,'tile_readback_masks',col,8)==255
-            assert part(state,'tx_beats',col,32)==161 and part(state,'rx_beats',col,32)==5200
+            assert part(state,'tile_label_masks',col,8)==255
+            assert part(state,'rx_beats',col,32)==88
 
 with (results/'pl.vcd').open() as source:
     header=[]
@@ -88,53 +88,58 @@ assert abs(1e12/period/300000000-1)<.001
 events=[]
 for index,(observed,host,identity) in enumerate(zip(measured,host_report['events'],manifest['events'])):
     frame=payloads[index*6144:(index+1)*6144]
-    expected=[reference(frame[row*160:(row+1)*160]+frame[5120:]) for row in range(tiles)]
-    actual_matrices=[None]*tiles
+    expected=reference(frame,identity['landmark_ids'])
+    values=struct.unpack('6144b',frame)
+    landmarks=[values[i:i+8] for i in range(5120,6144,8)]
+    last_labels=[]
     for col,(lane,routes) in enumerate(zip(observed['lanes'],mapping['lanes'])):
-        tx=lane['input'];assert len(tx)==17
+        tx=lane['input'];assert len(tx)==10
         assert tx[0][1]==[routes['route_headers'][8],*words(frame[5120:])]
         for row in range(8):
             tile=col*8+row
             assert tx[1+row][1]==[routes['route_headers'][row],*words(frame[tile*160:(tile+1)*160])]
-            timestamp,request=tx[9+row]
-            assert request==[routes['route_headers'][9+row]]
-            assert timestamp>observed['finish_ps'],'Diagnostic request inside timed interval'
+        seeds=expected['seed_slots']
+        seed_payload=struct.pack('<I',len(seeds))+bytes(seeds+[0]*((-len(seeds))%4))
+        assert tx[9][1]==[routes['route_headers'][9],*words(seed_payload)]
+        assert tx[9][0]>max(l['finish_ps'] for l in observed['lanes'])
         rx=lane['output'];assert len(rx)==16
         seen=set()
         for timestamp,packet in rx:
             row=routes['output_ids'].index(packet[0]&31);tile=col*8+row
             kind=(packet[0]>>12)&7
-            assert kind in (0,1) and (row,kind) not in seen
+            assert kind in (0,2) and (row,kind) not in seen
             seen.add((row,kind))
-            assert packet[1:]==words(expected[tile][:128] if kind==0 else expected[tile][128:]),(index,col,row,kind)
-            if kind==1:actual_matrices[tile]=struct.pack('<2560I',*packet[1:])
-            assert timestamp<=lane['finish_ps'] if kind==0 else timestamp>observed['finish_ps']
+            if kind==0:
+                hits=[values[i:i+8] for i in range(tile*160,(tile+1)*160,8)]
+                payload=bytes(sum(squared(h,r)<=645 for h in hits) for r in landmarks)
+                assert timestamp<=lane['finish_ps']
+            else:
+                payload=bytes(expected['labels'][tile*20:(tile+1)*20])
+                assert tx[9][0]<timestamp<=observed['finish_ps']
+                last_labels.append(timestamp)
+            assert packet[1:]==words(payload),(index,col,row,kind)
         assert not lane['partial_input'] and not lane['partial_output']
-        assert max(time for time,packet in rx if ((packet[0]>>12)&7)==0)==lane['finish_ps']
-    assert observed['readback_complete']
+    assert observed['complete'] and max(last_labels)==observed['finish_ps']
     accumulated=struct.unpack('<128I',(results/f'density-{index+1}.bin').read_bytes())
-    assert list(accumulated)==[sum(result[r] for result in expected) for r in range(128)]
-    matrix_bytes=b''.join(actual_matrices)
-    assert matrix_bytes==b''.join(result[128:] for result in expected)
-    (results/f'distances-{index+1}.bin').write_bytes(matrix_bytes)
+    assert list(accumulated)==expected['density']
+    assert (results/f'labels-{index+1}.bin').read_bytes()==bytes(expected['labels'])
+    assert (results/f'seed-slots-{index+1}.bin').read_bytes()==bytes(seeds+[0]*(64-len(seeds)))
+    assert words((results/f'seed-hit-ids-{index+1}.bin').read_bytes())==expected['seed_hit_ids']+[0]*(64-len(seeds))
+    assert host['seed_count']==len(seeds) and host['seed_overflow']==expected['seed_overflow']
     assert observed['cycles']==host['full_latency_pl_cycles']
     latency=observed['finish_ps']-observed['release_ps']
     assert abs(latency-observed['cycles']*period)<=2*quantum
     assert abs(observed['period_ps']-period)<=2*quantum
-    last_column=max(lane['finish_ps'] for lane in observed['lanes'])
-    assert abs(observed['finish_ps']-last_column-mapping['reduction_cycles']*period)<=2*quantum
-    first_inputs=[lane['first_input_ps'] for lane in observed['lanes']]
     events.append(dict(sequence=index+1,identity=identity['identity'],full_latency_pl_cycles=observed['cycles'],
-        full_latency_ns=latency/1000,exact_distances=tiles*2560,exact_aie_density_counts=tiles*128,
+        full_latency_ns=latency/1000,exact_labels=640,exact_aie_density_counts=tiles*128,
         exact_pl_accumulated_densities=128,density_sum=sum(accumulated),
-        column_finish_ns=[(lane['finish_ps']-observed['release_ps'])/1000 for lane in observed['lanes']],
-        first_input_accept_ns=[(time-observed['release_ps'])/1000 for time in first_inputs],
-        final_reduction_cycles=mapping['reduction_cycles']))
+        seed_count=expected['seed_count'],seed_slots=expected['seed_slots'],
+        seed_hit_ids=expected['seed_hit_ids'],seed_overflow=expected['seed_overflow']))
 clock=json.loads((build/'system/clock_evidence.json').read_text())
 summary=dict(status='passed',measurement='Integrated hardware emulation',columns=columns,tiles=tiles,hits=tiles*20,
     landmarks=128,radius_squared=645,start='Release raw resident PL embeddings',
-    finish='Final global landmark density sum registered in PL',pl_measured_hz=1e12/period,
+    finish='Final hit label stored in original order in PL',pl_measured_hz=1e12/period,
     aie_hz=clock['aie_hz'],pl_period_ps=period,events=events,
-    excluded='Host loading, CPU correctness checks and full distance-matrix readback')
+    excluded='Landmark sampling/gathering, host loading and CPU correctness checks')
 (results/'validation.json').write_text(json.dumps(summary,indent=2)+'\n')
 print(json.dumps(summary,indent=2))

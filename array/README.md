@@ -1,115 +1,108 @@
-# Parallel full-column density benchmark
+# Four-column landmark clustering
 
-Two columns use 16 AIE tiles and 320 real hits; four columns use 32 tiles and
-640 real hits. Every tile receives 20 distinct 8D signed INT8 hits and the same
-128 landmarks. The inclusive filter is `distance_squared <= 645`. The qualified
-kernel from `column/kernel.cpp` is reused, including its native SIMD layout
-preparation, squared norms and optimized distance loop.
+This extends the qualified density benchmark through PL seed selection, seed-ID
+multicast, cached AIE assignment, and original-order label storage in PL. It uses
+four independent 128-bit input/output pairs, 32 tiles in columns 24–27, 20 distinct
+8D INT8 hits per tile, and the same 128 landmarks from the density experiment.
 
-Each column has an independent 128-bit input/output pair at 300 MHz. Workers
-occupy rows 0–7 in physical columns 24 onward, with a shim interface in the same
-column. Compiler checks require column-local routes and the qualified native
-instruction schedule. Each input broadcasts the landmarks to its eight workers
-and distributes distinct hit packets. AIE returns 128 byte-sized counts per
-worker; its column's PL receiver adds these into 128 UINT32 partial sums.
+The single timer starts when raw resident PL hit/landmark registers are released
+and stops on the edge storing the final hit label in PL. It includes AIE layout
+and norm preparation, distances and density filtering, all communication, global
+PL density reduction, seed selection, assignment, and label capture. CPU checks
+and host input loading are outside this interval. Landmark sampling/gathering is
+also outside this benchmark: fixtures supply the unchanged full-event landmarks.
 
-Once all columns finish, PL combines their partial sums with a registered adder
-tree. All 128 landmarks are reduced in parallel. Two columns take one PL cycle;
-four columns take two. There is one global timer, from the common release edge
-of the resident raw input registers through the edge that registers the final
-128 global sums. It includes the slowest column and the entire final reduction.
-Layout and norm preparation remain on AIE and remain inside this interval.
+## Algorithm
 
-There are no substage timers or timed acknowledgement/checksum passes. The
-per-column count registers clear in parallel on the release edge. The final
-sum is overwritten for each event. A host clear command is also available
-outside the timing window. Event processing does not overlap: diagnostic
-distance readback must finish before a new event is released.
+* Density counts hits with inclusive squared distance <= 645.
+* Candidates are ranked by decreasing density, then increasing original hit ID.
+  Landmark slots must be in increasing original hit-ID order; the host checks this.
+* Candidates require `5*density >= maximum_density`.
+* A seed must have squared distance >= 3267 from every earlier accepted seed.
+  At most 64 seeds are retained; an overflow flag indicates additional qualifying
+  candidates. All-zero densities still select at least one landmark.
+* Every hit is assigned to its nearest selected seed using exact cached INT32
+  distances. Equal distances favor the earlier seed. There is no assignment-radius
+  rejection, noise label, centroid update, or iterative refinement.
+* Outputs are 640 byte labels, 128 UINT32 densities, selected landmark slots, and
+  a table mapping cluster labels to original seed hit IDs.
 
-After the global sum is ready, PL requests each worker's cached 2,560 INT32
-distances. The scheduler fences around the AIE readback gate are essential:
-they prevent a matrix header from occupying the shared return path before all
-densities have returned. No readback requests are issued before global timer
-completion. Diagnostic matrices are retained in PL for register readback.
+The PL selector implements the greedy rule without materializing a sorted list:
+a seven-stage maximum tree selects the best unsuppressed candidate, then 128
+parallel separation lanes suppress its close neighbors. Each lane processes two
+coordinates per clock through subtraction, square, and accumulation stages. AIE
+uses native 32-bit vector shuffles and fused minimum/compare operations on four
+hits at a time. The 1–3 seed cases are unrolled; the larger seed loop is pipelined.
+Code generation checks require spill-free assignment loops of at most 12 issue
+bundles and retain the qualified 13-bundle distance loops.
+No distance matrix is copied back to PL; the cache remains on AIE for assignment.
 
-## Real data and qualification
+Each column multicasts one seed packet to all eight workers. The packet contains
+a header, seed count, and four byte-sized landmark slots per subsequent word.
+Each worker returns a header and five words containing its 20 byte labels.
+AIE scheduler fences prevent any label packet from preceding the seed request.
+The four column receivers gather independently, including under backpressure.
 
-The external fixture manifest identifies the unchanged compact-KAN checkpoint,
-full embedding arrays and landmark selections for mixed events 187 and 393.
-The four integrated trials are 187,393,187,393. Payloads contain 640 hit rows
-(original IDs 0–639) followed by the original 128 landmark rows. Two columns
-use IDs 0–319; four use 0–639. No hits are duplicated between tiles. Both sizes
-therefore preserve the first full column's inputs from the earlier benchmark.
-Generated fixtures, reports, binaries and exploratory scripts stay outside Git.
+## Validation and reproduction
 
-`rtl-test` checks exact input packets, all matrix storage, independent stream
-backpressure, skewed column completion, reversed tile return order, AXI control
-backpressure, input load guards, fresh-event sums and the precise timer endpoint.
-Its response timing is test stimulus, not an AIE latency measurement.
-
-`aie-gate-test` withholds all diagnostic requests and requires every density to
-return with no matrix output. `aie-sim` checks every worker's distances and
-counts against the independent scalar CPU reference for both distinct events.
-`codegen` checks placement, routes, packet IDs and the optimized instruction
-loops. `package` checks the actual packaged graph and interface and hashes the
-measured system's components.
-
-The integrated host compares all 128 final densities after completion. In
-hardware emulation, `pl-trace` checks every input byte, every returned distance
-and density count, and the observed global timer interval. It also verifies
-simultaneous input starts, final reduction depth, and diagnostic traffic after
-the timer has stopped. Full matrix reads via emulated AXI registers are avoided;
-the trace contains every received matrix word and saves the verified matrices.
-On a physical board, the host reads the matrices from PL registers instead.
-
-The integrated model uses 1 GHz AIE and 300 MHz PL. Native AIE simulation uses
-1.25 GHz and is used for correctness only. Integrated clock evidence is saved
-from the generated model, and the PL period is checked against trace timestamps.
-Hardware emulation results are not physical-board timing-closure measurements.
-
-## Reproduction
-
-With Vitis 2022.2, the VCK5000 platform and XRT configured:
+Use Vitis 2022.2 and the VCK5000 QDMA platform. `COLUMNS=4` is required. Paths can
+be overridden with `BUILD`, `AIE_BUILD`, and `DATA`. The source uses separate
+clustering build/runtime directories, preserving the earlier density artifacts.
 
 ```bash
-source env.sh  # optional machine-local environment, ignored by Git
-make -f array/Makefile rtl-test host COLUMNS=2
-make -f array/Makefile aie COLUMNS=2
-make -f array/Makefile aie-gate-test aie-sim COLUMNS=2
-make -f array/Makefile xo link package COLUMNS=2
-make -f array/Makefile emu pl-trace COLUMNS=2
-# Repeat with COLUMNS=4; each stream topology requires its own linked system.
+source env.sh
+export DATA=$HOME/aie-landmark-benchmark-data/cluster-real-mixed
+# DATA initially contains the original four density payloads/manifest/RTL oracle.
+python3 array/tools/clustering_reference.py "$DATA" "$DATA"
+make -f array/Makefile seed-test rtl-test host xo
+make -f array/Makefile aie
+make -f array/Makefile aie-gate-test aie-cap-test aie-sim
+make -f array/Makefile link package
+make -f array/Makefile emu pl-trace
 ```
 
-Defaults are `$HOME/aie-array-builds/cN`, `/dev/shm/aie-array-cN` for compiler
-scratch, and `$HOME/aie-landmark-benchmark-data/array-real-mixed` for fixtures.
-Override `BUILD`, `AIE_BUILD` and `DATA` as needed. Native qualification defaults
-to the two unique fixtures; integrated emulation runs every fixture in the file.
-Run large system links and emulations sequentially on memory-constrained hosts.
+The selector test covers threshold equality, density ties, signed endpoints,
+duplicate landmarks, zero densities, 64-seed saturation, and repeated events.
+The RTL system test checks independent backpressure, skew, reverse tile return
+order, seeds, seed identities, labels, load guards, and the exact final-write
+counter endpoint. Native AIE tests cover real event-derived seeds, withholding
+seed packets, and 64 supplied seed IDs on real embeddings plus a synthetic all-tied event. The latter is an
+assignment-capacity test, not an algorithm-selected 64-seed performance claim.
+The integrated host independently computes every final output using scalar CPU
+integer arithmetic; the trace checker also verifies every stream payload and
+the complete timer interval. No substage timers are added.
+
+The unchanged fixtures are mixed events 187 and 393, repeated in that order.
+They contain hits 0–639 and the same full-event landmarks; their expected seed
+counts are 2 and 3. This is a fixed-input hardware benchmark, not a full-event
+reconstruction-quality evaluation. Native AIE simulation targets 1.25 GHz;
+integrated emulation uses the separately verified model clock (previously 1 GHz
+AIE and 300 MHz PL). Emulation does not establish physical timing closure.
 
 ## Register map
 
-The AXI-Lite aperture is 64 KiB, matching the VCK5000 linker allocation.
-All addresses are byte offsets. Untimed matrix readback selects one tile at a
-time; this keeps the complete control interface within one allocated segment.
+The control aperture remains 64 KiB. All offsets are bytes.
 
 | Address | Meaning |
 |---|---|
-| `0x0000` | Write 1: release all columns; write 2: clear final sums while idle |
-| `0x0004` | Busy, global density complete, diagnostic complete, fault (bits 0–3) |
-| `0x0008` | Compiled column count |
-| `0x0010/14` | Global elapsed PL cycles, low/high |
-| `0x0028/2c` | Column density/readback completion masks |
-| `0x0034/38` | Signature `0x41525231`, squared radius 645 |
-| `0x003c` | Diagnostic matrix selector: `column*8+row`, writable while idle |
-| `0x0400+c*0x100` | Column TX/RX beat counts, tile density/readback masks (four words) |
-| `0x0440+c*0x100` | 17 compiled routing headers: eight hits, landmarks, eight readback requests |
+| `0x0000` | Write 1: release; write 2: clear densities while idle |
+| `0x0004` | Busy, density done, cluster done, fault, cluster done, seeds done (bits 0–5) |
+| `0x0008` | Column count (4) |
+| `0x0010/14` | Complete latency in PL clocks, low/high |
+| `0x0028/2c` | Column density/label completion masks |
+| `0x0034/38` | Signature `0x434c5331`, density squared threshold 645 |
+| `0x003c` | Seed count (bits 0–6), overflow (bit 7) |
+| `0x0400+c*0x100` | Column TX/RX beats, tile density/label masks |
+| `0x0440+c*0x100` | Ten compiled routing headers: eight hits, landmarks, seeds |
 | `0x04a0+c*0x100` | Eight compiled output packet IDs |
-| `0x2000` | 128 final UINT32 landmark densities |
-| `0x4000+c*0x400` | 128 column partial sums |
-| `0x8000+c*0x1000` | 576 resident words: 160 hit rows followed by 128 landmark rows |
-| `0xc000..0xe7fc` | Selected tile's 2,560 INT32 distances, hit/landmark order |
+| `0x1000..0x127f` | 640 labels packed four per word, original hit order |
+| `0x2000..0x21ff` | 128 global densities |
+| `0x2400..0x243f` | 64 selected landmark slots, four bytes per word |
+| `0x2500..0x25ff` | 64 original seed hit IDs (unused entries zero) |
+| `0x3000..0x31ff` | Load 128 original landmark hit IDs before each release |
+| `0x4000+c*0x400` | 128 column partial densities |
+| `0x8000+c*0x1000` | 576 resident words: column hits then shared landmarks |
 
-Each column sends 153 timed input beats and receives 72 density beats per event.
-Untimed readback adds eight request beats and 5,128 matrix beats, for total
-column counts of 161 TX and 5,200 RX.
+Per column, input traffic is 153 initial beats plus
+`ceil((2+ceil(seed_count/4))/4)` seed beats. Output is 72 density beats and 16 label
+beats. All of these transfers occur inside the timing window.

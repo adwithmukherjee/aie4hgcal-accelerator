@@ -3,9 +3,9 @@ set -eo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 if [[ -f "$root/env.sh" ]]; then source "$root/env.sh" >/dev/null; fi
 columns=${COLUMNS:?Set COLUMNS to the compiled column count}
-build=${BUILD:-$HOME/aie-array-builds/c$columns}
-data=${DATA:-$HOME/aie-landmark-benchmark-data/array-real-mixed}
-export SDACCEL_EM_RUN_DIR=${SDACCEL_EM_RUN_DIR:-$HOME/aie-landmark-benchmark-runs/runtime/array-c$columns}
+build=${BUILD:-$HOME/aie-cluster-builds/c$columns}
+data=${DATA:-$HOME/aie-landmark-benchmark-data/cluster-real-mixed}
+export SDACCEL_EM_RUN_DIR=${SDACCEL_EM_RUN_DIR:-$HOME/aie-landmark-benchmark-runs/runtime/cluster-c$columns}
 export TRANSPORT_RESULTS=${TRANSPORT_RESULTS:-$build/system/results}
 mkdir -p "$SDACCEL_EM_RUN_DIR" "$TRANSPORT_RESULTS"
 export PATH="$root/tools/wrappers:$PATH"

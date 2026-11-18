@@ -22,9 +22,9 @@ for col in sorted(wanted):
   instructions=[line for line in kernel.splitlines() if re.match(r'\s+\d+\s+0x',line)]
   reads=[i for i,line in enumerate(instructions) if 'SS.' in line]
   headers=[i for i,line in enumerate(instructions) if 'PKTHD' in line]
-  assert len(reads)==1 and len(headers)==2 and headers[0]<reads[0]<headers[1]
+  assert len(reads)>=3 and len(headers)==2 and headers[0]<reads[0]<headers[1]
   assert 'MS.' not in instructions[reads[0]]
-  loops=[];label=None;body=[];at_end=False
+  loops=[];assignment=[];label=None;body=[];at_end=False
   for line in kernel.splitlines():
    if line.startswith('.label ZLS_'):label=line.split()[1];body=[];at_end=False
    elif line.startswith('.label ZLE_') and label:at_end=True
@@ -33,9 +33,12 @@ for col in sorted(wanted):
     if at_end:
      if any('VMUL.48' in item for item in body) and any('VCMP' in item for item in body):
       loops.append(dict(scheduled_issue_bundles=len(body),explicit_spill_instructions=sum('SPIL' in item for item in body)))
+     if not any('VMUL' in item for item in body) and any('VCMP' in item for item in body):
+      assignment.append(dict(scheduled_issue_bundles=len(body),explicit_spill_instructions=sum('SPIL' in item for item in body)))
      label=None
+  assert assignment and all(x['scheduled_issue_bundles']<=12 and x['explicit_spill_instructions']==0 for x in assignment),(col,row,assignment)
   assert len(loops)==2 and all(x['scheduled_issue_bundles']<=13 and x['explicit_spill_instructions']==0 for x in loops),(col,row,loops)
-  reports.append(dict(column=col,row=row,distance_loops=loops,density_before_gate_before_matrix=True))
+  reports.append(dict(column=col,row=row,distance_loops=loops,assignment_loops=assignment,density_before_seed_read_before_labels=True))
 routes=json.loads((build/'aie/Work/temp/router_soln.json').read_text())
 seen=set()
 for name,net in routes.items():

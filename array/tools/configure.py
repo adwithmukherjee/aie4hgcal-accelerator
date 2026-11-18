@@ -3,11 +3,11 @@ import json, sys
 from pathlib import Path
 
 build=Path(sys.argv[1]).resolve()
-columns=int(sys.argv[2]);assert columns in (1,2,4)
+columns=int(sys.argv[2]);assert columns==4
 config=build/'config';config.mkdir(parents=True,exist_ok=True)
 (config/'experiment.json').write_text(json.dumps(dict(columns=columns,
     physical_columns=list(range(24,24+columns)),rows=list(range(8)),
-    hits_per_tile=20,landmarks=128,dimensions=8,radius_squared=645,
+    hits_per_tile=20,landmarks=128,dimensions=8,radius_squared=645,separation_squared=3267,density_fraction=[1,5],max_seeds=64,
     pl_hz=300000000,reduction_cycles=2 if columns==4 else 1),indent=2)+'\n')
 (config/'constraints.json').write_text(json.dumps(dict(NodeConstraints={
     f'array_graph.worker[{c*8+r}]':dict(reserved_memory=dict(column=24+c,row=r,bankId=0,offset=256))

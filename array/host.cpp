@@ -2,6 +2,8 @@
 #include <experimental/xrt_ip.h>
 #include <experimental/xrt_xclbin.h>
 #include <xclhal2.h>
+#include <algorithm>
+#include <numeric>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -36,12 +38,14 @@ int main(int argc,char** argv) {
     if(argc!=6) throw std::runtime_error("Usage: array_host design.xclbin data config results columns");
     const unsigned columns=std::stoul(argv[5]);
     const unsigned tiles=columns*8;
-    if(columns!=1 && columns!=2 && columns!=4) throw std::runtime_error("Invalid column count");
+    if(columns!=4) throw std::runtime_error("Invalid column count");
     auto frames=words(fs::path(argv[2])/"payloads.bin");
     if(frames.size()%1536) throw std::runtime_error("Invalid compact column frames");
     auto headers=words(fs::path(argv[3])/"route_headers.bin");
     auto ids=words(fs::path(argv[3])/"output_ids.bin");
-    if(headers.size()!=17*columns || ids.size()!=8*columns) throw std::runtime_error("Invalid compiled packet map");
+    if(headers.size()!=10*columns || ids.size()!=8*columns) throw std::runtime_error("Invalid compiled packet map");
+    auto landmark_ids=words(fs::path(argv[2])/"landmark_ids.bin");
+    if(landmark_ids.size()!=frames.size()/1536*128) throw std::runtime_error("Landmark identities missing");
     fs::create_directories(argv[4]);
     const char* mode=std::getenv("XCL_EMULATION_MODE");
     if(mode && std::string(mode)!="hw_emu") throw std::runtime_error("Use hw_emu or unset XCL_EMULATION_MODE");
@@ -51,7 +55,7 @@ int main(int argc,char** argv) {
     auto uuid=device.load_xclbin(argv[1]);
     xrt::ip pl(device,uuid,"array_pl:{array_pl_1}");
     const auto signature=pl.read_register(0x34),radius=pl.read_register(0x38);
-    if(signature!=0x41525231 || radius!=645) {
+    if(signature!=0x434c5331 || radius!=645) {
         std::ostringstream error;
         error<<"Wrong array register map: signature=0x"<<std::hex<<signature<<", radius=0x"<<radius;
         throw std::runtime_error(error.str());
@@ -84,7 +88,7 @@ int main(int argc,char** argv) {
     };
 #pragma GCC diagnostic pop
     for(unsigned c=0;c<columns;++c) {
-        write_words(0x440+c*0x100,headers.data()+c*17,17);
+        write_words(0x440+c*0x100,headers.data()+c*10,10);
         write_words(0x4a0+c*0x100,ids.data()+c*8,8);
     }
     if(pl.read_register(8)!=columns) throw std::runtime_error("Compiled column count differs");
@@ -103,6 +107,38 @@ int main(int argc,char** argv) {
                 expected_density[r]+=squared<=645;
             }
         }
+        const auto* event_ids=landmark_ids.data()+event*128;
+        for(unsigned i=1;i<128;++i)
+            if(event_ids[i]<=event_ids[i-1]) throw std::runtime_error("Landmark slots must be ordered by original hit ID");
+        std::vector<unsigned> order(128),seeds;
+        std::iota(order.begin(),order.end(),0);
+        std::stable_sort(order.begin(),order.end(),[&](unsigned a,unsigned b){return expected_density[a]>expected_density[b];});
+        const auto maximum=*std::max_element(expected_density.begin(),expected_density.end());
+        bool overflow=false;
+        for(auto candidate:order) {
+            if(5*expected_density[candidate]<maximum) continue;
+            bool separated=true;
+            for(auto seed:seeds) {
+                int32_t squared=0;
+                for(unsigned d=0;d<8;++d) {
+                    const int32_t delta=int32_t(coordinates[5120+candidate*8+d])-int32_t(coordinates[5120+seed*8+d]);
+                    squared+=delta*delta;
+                }
+                if(squared<3267) {separated=false;break;}
+            }
+            if(separated) {if(seeds.size()<64) seeds.push_back(candidate);else overflow=true;}
+        }
+        std::vector<uint32_t> expected_labels(160),expected_slots(16),expected_seed_ids(64);
+        for(unsigned s=0;s<seeds.size();++s) {
+            expected_slots[s/4]|=seeds[s]<<(8*(s%4));expected_seed_ids[s]=event_ids[seeds[s]];
+        }
+        for(unsigned h=0;h<640;++h) {
+            unsigned best=0;
+            for(unsigned s=1;s<seeds.size();++s)
+                if(expected_distance[h*128+seeds[s]]<expected_distance[h*128+seeds[best]]) best=s;
+            expected_labels[h/4]|=best<<(8*(h%4));
+        }
+        write_words(0x3000,event_ids,128);
         pl.write_register(0,2);
         for(unsigned c=0;c<columns;++c) {
             std::vector<uint32_t> bank(576);
@@ -118,44 +154,43 @@ int main(int argc,char** argv) {
             status=pl.read_register(4);
             if(status&8) throw std::runtime_error("Array protocol fault");
             if(std::chrono::steady_clock::now()>deadline) throw std::runtime_error("Array completion timeout");
-            if(!(status&4)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        } while(!(status&4));
+            if(!(status&16)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while(!(status&16));
         if(!(status&2)) throw std::runtime_error("Missing timed density completion");
         const uint64_t cycles=uint64_t(pl.read_register(0x10))|(uint64_t(pl.read_register(0x14))<<32);
         if(pl.read_register(0x28)!=(1u<<columns)-1 || pl.read_register(0x2c)!=(1u<<columns)-1)
             throw std::runtime_error("Incomplete tile masks");
+        const unsigned metadata=pl.read_register(0x3c);
+        if((metadata&127)!=seeds.size() || bool(metadata&128)!=overflow)
+            throw std::runtime_error("Seed count/cap status differs from CPU");
         for(unsigned c=0;c<columns;++c) {
             const unsigned offset=0x400+c*0x100;
-            if(pl.read_register(offset)!=161 || pl.read_register(offset+4)!=5200 ||
+            const unsigned seed_beats=(2+(seeds.size()+3)/4+3)/4;
+            if(pl.read_register(offset)!=153+seed_beats || pl.read_register(offset+4)!=88 ||
                pl.read_register(offset+8)!=255 || pl.read_register(offset+12)!=255)
                 throw std::runtime_error("Incomplete column traffic or tile masks");
         }
-        std::vector<uint32_t> density(128),distance(tiles*2560);
+        std::vector<uint32_t> density(128),labels(160),slots(16),seed_ids(64);
         read_words(0x2000,density.data(),density.size());
-        if(density!=expected_density) throw std::runtime_error("Accumulated landmark densities differ from CPU");
-        // Hardware emulation already records every matrix word on the PL RX
-        // stream. The CPU trace checker verifies these after simulation; avoid
-        // 20,480 slow register transactions per eight-tile emulated event.
-        if(!mode) {
-            for(unsigned tile=0;tile<tiles;++tile) {
-                pl.write_register(0x3c,tile);
-                read_words(0xc000,distance.data()+tile*2560,2560);
-            }
-            if(distance!=expected_distance) throw std::runtime_error("Per-tile distances differ from CPU");
-            save(fs::path(argv[4])/("distances-"+std::to_string(event+1)+".bin"),distance);
-        }
+        read_words(0x1000,labels.data(),labels.size());
+        read_words(0x2400,slots.data(),slots.size());
+        read_words(0x2500,seed_ids.data(),seed_ids.size());
+        if(density!=expected_density || labels!=expected_labels || slots!=expected_slots || seed_ids!=expected_seed_ids)
+            throw std::runtime_error("Clustering outputs differ from independent integer CPU reference");
+        save(fs::path(argv[4])/("labels-"+std::to_string(event+1)+".bin"),labels);
+        save(fs::path(argv[4])/("seed-slots-"+std::to_string(event+1)+".bin"),slots);
+        save(fs::path(argv[4])/("seed-hit-ids-"+std::to_string(event+1)+".bin"),seed_ids);
         const uint64_t after=uint64_t(pl.read_register(0x10))|(uint64_t(pl.read_register(0x14))<<32);
         if(cycles!=after) throw std::runtime_error("Timer advanced during untimed correctness readback");
         save(fs::path(argv[4])/("density-"+std::to_string(event+1)+".bin"),density);
         uint32_t total=0;for(auto count:density)total+=count;
         if(event) report<<",\n";
         report<<"{\"sequence\":"<<event+1<<",\"full_latency_pl_cycles\":"<<cycles
-              <<",\"exact_distances\":"<<(mode?0:distance.size())<<",\"matrix_validation\":\""
-              <<(mode?"pending_trace_check":"host_register_readback")<<"\",\"exact_pl_accumulated_densities\":128"
-              <<",\"density_sum\":"<<total<<"}";
+              <<",\"seed_count\":"<<seeds.size()<<",\"seed_overflow\":"<<(overflow?"true":"false")
+              <<",\"exact_labels\":640,\"exact_pl_accumulated_densities\":128,\"density_sum\":"<<total<<"}";
         report.flush();
-        std::cout<<"PASS: "<<cycles<<" PL cycles, 128 exact accumulated densities; "
-                 <<(mode?"matrix comparison pending trace check":"matrices checked")<<std::endl;
+        std::cout<<"PASS: "<<cycles<<" PL cycles, "<<seeds.size()<<" seeds, 640 exact labels and 128 exact densities"<<std::endl;
+
     }
     report<<"\n],\"status\":\"passed\"}\n";
     return 0;

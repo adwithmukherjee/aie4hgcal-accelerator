@@ -2,15 +2,15 @@ SHELL := /bin/bash
 .SHELLFLAGS := -e -o pipefail -c
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 COLUMNS ?= 4
-BUILD ?= $(HOME)/aie-array-builds/c$(COLUMNS)
-AIE_BUILD ?= /dev/shm/aie-array-c$(COLUMNS)
-DATA ?= $(HOME)/aie-landmark-benchmark-data/array-real-mixed
+BUILD ?= $(HOME)/aie-cluster-builds/c$(COLUMNS)
+AIE_BUILD ?= /dev/shm/aie-cluster-c$(COLUMNS)
+DATA ?= $(HOME)/aie-landmark-benchmark-data/cluster-real-mixed
 PLATFORM ?= /opt/xilinx/platforms/xilinx_vck5000_gen4x8_qdma_2_202220_1/xilinx_vck5000_gen4x8_qdma_2_202220_1.xpfm
 NATIVE_EVENTS ?= 2
 export TMPDIR := $(BUILD)/tmp
 export PYTHONDONTWRITEBYTECODE := 1
 .DEFAULT_GOAL := aie
-.PHONY: configure aie codegen aie-sim aie-gate-test rtl-test xo host link package emu pl-trace
+.PHONY: configure aie codegen aie-sim aie-gate-test aie-cap-test seed-test rtl-test xo host link package emu pl-trace
 configure:
 	mkdir -p $(BUILD)/tmp $(BUILD)/aie
 	python3 $(ROOT)/array/tools/configure.py $(BUILD) $(COLUMNS)
@@ -36,10 +36,10 @@ aie-gate-test:
 	python3 $(ROOT)/array/tools/check_aie.py $(DATA) $(BUILD)/aie/native-gated $(BUILD)/config/packet_map.json --gated
 rtl-test: configure
 	mkdir -p $(BUILD)/rtl-test
-	cd $(BUILD)/rtl-test && xvlog --sv --define TEST_COLUMNS=$(COLUMNS) $(ROOT)/array/column_lane.sv $(ROOT)/array/control.sv $(ROOT)/array/testbench.sv
+	cd $(BUILD)/rtl-test && xvlog --sv --define TEST_COLUMNS=$(COLUMNS) $(ROOT)/array/seed_select.sv $(ROOT)/array/column_lane.sv $(ROOT)/array/control.sv $(ROOT)/array/testbench.sv
 	cd $(BUILD)/rtl-test && xelab array_tb -s array_tb --debug typical
 	cd $(BUILD)/rtl-test && xsim array_tb -runall --testplusarg DATA=$(DATA) 2>&1 | tee test.log
-	grep -q 'PASS: independent columns and global PL reduction' $(BUILD)/rtl-test/test.log
+	grep -q 'PASS: four-column clustering' $(BUILD)/rtl-test/test.log
 xo: configure
 	mkdir -p $(BUILD)/pl
 	cd $(BUILD)/pl && vivado -mode batch -source $(ROOT)/array/package.tcl -tclargs $(ROOT) $(BUILD) $(COLUMNS) > package.log 2>&1
@@ -59,3 +59,15 @@ emu:
 	COLUMNS=$(COLUMNS) BUILD=$(BUILD) DATA=$(DATA) bash $(ROOT)/array/run_emu.sh
 pl-trace:
 	python3 $(ROOT)/array/tools/check_pl_trace.py $(DATA) $(BUILD)
+
+seed-test: configure
+	mkdir -p $(BUILD)/seed-test
+	cd $(BUILD)/seed-test && xvlog --sv $(ROOT)/array/seed_select.sv $(ROOT)/array/seed_testbench.sv
+	cd $(BUILD)/seed-test && xelab seed_tb -s seed_tb --debug typical
+	cd $(BUILD)/seed-test && xsim seed_tb -runall --testplusarg DATA=$(DATA) 2>&1 | tee test.log
+	grep -q 'PASS: seed priority' $(BUILD)/seed-test/test.log
+
+aie-cap-test:
+	python3 $(ROOT)/array/tools/make_input.py $(DATA) $(BUILD) --events 2 --assignment-count 64 --ties-last
+	cd $(BUILD)/aie && DENSITY_EVENTS=2 aiesimulator --pkg-dir=Work --output-dir=$(BUILD)/aie/native-cap --output-time-stamp=no > simulate-cap.log 2>&1
+	python3 $(ROOT)/array/tools/check_aie.py $(DATA) $(BUILD)/aie/native-cap $(BUILD)/config/packet_map.json --events 2 --assignment-count 64 --ties-last

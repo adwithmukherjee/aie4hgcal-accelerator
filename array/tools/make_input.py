@@ -1,12 +1,14 @@
-"""Packetize distinct real hit slices on independent column ports."""
+"""Native-simulator packets; real clustering decisions come from the CPU oracle."""
 import argparse,json,struct
 from pathlib import Path
+from clustering_reference import reference
 p=argparse.ArgumentParser();p.add_argument('data',type=Path);p.add_argument('build',type=Path)
-p.add_argument('--events',type=int,default=2);p.add_argument('--gated',action='store_true');a=p.parse_args()
+p.add_argument('--events',type=int,default=2);p.add_argument('--gated',action='store_true')
+p.add_argument('--assignment-count',type=int,default=0);p.add_argument('--ties-last',action='store_true');a=p.parse_args()
 mapping=json.loads((a.build/'config/packet_map.json').read_text())
-frames=(a.data/'payloads.bin').read_bytes();assert len(frames)%6144==0
-events=1 if a.gated else a.events
-assert 0<events<=len(frames)//6144
+manifest=json.loads((a.data/'manifest.json').read_text());frames=(a.data/'payloads.bin').read_bytes()
+events=1 if a.gated else a.events;assert 0<events<=len(frames)//6144
+assert 0<=a.assignment_count<=64
 def packet(out,header,payload=b''):
  words=[header,*struct.unpack('<%dI'%(len(payload)//4),payload)]
  for offset in range(0,len(words),4):
@@ -17,7 +19,11 @@ for lane in mapping['lanes']:
  with (a.build/f'aie/input-{c}.txt').open('w') as out:
   for event in range(events):
    frame=frames[event*6144:(event+1)*6144]
+   if a.ties_last and event==events-1:frame=bytes(6144)
    packet(out,headers[8],frame[5120:])
    for row in range(8):packet(out,headers[row],frame[c*1280+row*160:c*1280+(row+1)*160])
    if not a.gated:
-    for row in range(8):packet(out,headers[9+row])
+    seeds=reference(frame,manifest['events'][event]['landmark_ids'])['seed_slots']
+    if a.assignment_count:seeds=[(127-i*3)%128 for i in range(a.assignment_count)]
+    payload=struct.pack('<I',len(seeds))+bytes(seeds+[0]*((-len(seeds))%4))
+    packet(out,headers[9],payload)
