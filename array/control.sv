@@ -20,7 +20,7 @@ module array_control #(parameter COLUMNS=4) (
  reg [63:0] elapsed_cycles;
  reg [31:0] density_sum [0:127];
  reg [31:0] pair_sum0 [0:127], pair_sum1 [0:127];
- reg seed_start, seed_started;
+ reg seed_start, seed_started, force_64;
  wire seeds_done, seed_overflow;
  wire [6:0] seed_count;
  wire [511:0] seed_slots;
@@ -34,6 +34,7 @@ module array_control #(parameter COLUMNS=4) (
   assign final_counts[d*32+:32]=density_sum[d];
  end endgenerate
  seed_select select_seeds(.clk(ap_clk),.rst_n(ap_rst_n),.start(seed_start),
+  .force_64(force_64),
   .densities(final_counts),.landmarks(landmarks[0+:8192]),.landmark_hit_ids(landmark_hit_ids),
   .done(seeds_done),.overflow(seed_overflow),.seed_count(seed_count),.seed_slots(seed_slots),.seed_hit_ids(seed_hit_ids));
  wire [COLUMNS-1:0] column_density_done, column_labels_done, column_fault, inputs_loaded;
@@ -101,9 +102,10 @@ module array_control #(parameter COLUMNS=4) (
    16'h0014: read_register=elapsed_cycles[63:32];
    16'h0028: read_register=column_density_done;
    16'h002c: read_register=column_labels_done;
-   16'h0034: read_register=32'h434c5331;
+   16'h0034: read_register=32'h434c5332;
    16'h0038: read_register=645;
    16'h003c: read_register={24'b0,seed_overflow,seed_count};
+   16'h0040: read_register={31'b0,force_64};
    default: begin
     if(address>=16'h2000 && address<16'h2200) read_register=density_sum[(address-16'h2000)>>2];
     if(address>=16'h1000 && address<16'h1280) read_register=labels[(address-16'h1000)*8+:32];
@@ -131,7 +133,7 @@ module array_control #(parameter COLUMNS=4) (
  always @(posedge ap_clk) begin
   if(!ap_rst_n) begin
    busy<=0; density_done<=0; cluster_done<=0; fault<=0; release_strobe<=0; reduce_valid<=0;
-   elapsed_cycles<=0; aw_pending<=0; w_pending<=0; seed_start<=0;seed_started<=0;ids_loaded<=0;landmark_hit_ids<=0;
+   elapsed_cycles<=0; aw_pending<=0; w_pending<=0; seed_start<=0;seed_started<=0;force_64<=0;ids_loaded<=0;landmark_hit_ids<=0;
    s_axi_control_bvalid<=0; s_axi_control_bresp<=0;
    s_axi_control_rvalid<=0; s_axi_control_rresp<=0; s_axi_control_rdata<=0;
    for(j=0;j<128;j=j+1) begin density_sum[j]<=0; pair_sum0[j]<=0; pair_sum1[j]<=0; end
@@ -148,6 +150,8 @@ module array_control #(parameter COLUMNS=4) (
      elapsed_cycles<=0; reduce_valid<=0;seed_started<=0;ids_loaded<=0;
     end else if(aw_address==0 && write_strobes==4'hf && write_data==2 && !busy) begin
      for(j=0;j<128;j=j+1) density_sum[j]<=0;
+    end else if(aw_address==16'h0040 && write_strobes==4'hf && write_data<=1 && !busy) begin
+     force_64<=write_data[0];
     end else if(aw_address>=16'h3000 && aw_address<16'h3200 && aw_address[1:0]==0 && write_strobes==4'hf && !busy) begin
      landmark_hit_ids[(aw_address-16'h3000)*8+:32]<=write_data;
      ids_loaded[(aw_address-16'h3000)>>2]<=1;

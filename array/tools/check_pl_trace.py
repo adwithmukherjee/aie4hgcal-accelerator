@@ -5,12 +5,16 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'tools'))
 from clustering_reference import reference,squared
 
 data,build=map(Path,sys.argv[1:3])
-results=build/'system/results'
+mode=sys.argv[3] if len(sys.argv)>3 else 'normal'
+assert mode in ('normal','force64')
+force_64=mode=='force64'
+results=build/f'system/results-{mode}'
 mapping=json.loads((build/'config/packet_map.json').read_text())
 manifest=json.loads((data/'manifest.json').read_text())
 host_report=json.loads((results/'events.json').read_text())
 columns=mapping['columns'];tiles=columns*8
 assert host_report['status']=='passed' and host_report['columns']==columns
+assert host_report['seed_mode']==('force64_density_rank' if force_64 else 'normal')
 payloads=(data/'payloads.bin').read_bytes()
 names,state,measured={},{},[]
 current=None
@@ -23,6 +27,7 @@ def sample(timestamp,changes):
     global current
     old=state.copy();state.update(changes)
     if state.get('release_strobe')==1 and old.get('release_strobe')!=1:
+        assert state.get('force_64')==int(force_64),'Hardware seed mode differs from requested benchmark'
         assert state.get('tx_valid')==(1<<columns)-1,'Column transmitters were not released together'
         current=dict(release_ps=timestamp,lanes=[dict(input=[],output=[],partial_input=[],partial_output=[]) for _ in range(columns)])
         measured.append(current)
@@ -59,6 +64,8 @@ def sample(timestamp,changes):
         for col in range(columns):
             assert part(state,'tile_label_masks',col,8)==255
             assert part(state,'rx_beats',col,32)==88
+            seed_count=host_report['events'][len(measured)-1]['seed_count']
+            assert part(state,'tx_beats',col,32)==153+(2+(seed_count+3)//4+3)//4
 
 with (results/'pl.vcd').open() as source:
     header=[]
@@ -88,7 +95,8 @@ assert abs(1e12/period/300000000-1)<.001
 events=[]
 for index,(observed,host,identity) in enumerate(zip(measured,host_report['events'],manifest['events'])):
     frame=payloads[index*6144:(index+1)*6144]
-    expected=reference(frame,identity['landmark_ids'])
+    expected=reference(frame,identity['landmark_ids'],force_64)
+    if force_64:assert expected['seed_count']==64 and len(set(expected['seed_slots']))==64
     values=struct.unpack('6144b',frame)
     landmarks=[values[i:i+8] for i in range(5120,6144,8)]
     last_labels=[]
@@ -137,6 +145,7 @@ for index,(observed,host,identity) in enumerate(zip(measured,host_report['events
         seed_hit_ids=expected['seed_hit_ids'],seed_overflow=expected['seed_overflow']))
 clock=json.loads((build/'system/clock_evidence.json').read_text())
 summary=dict(status='passed',measurement='Integrated hardware emulation',columns=columns,tiles=tiles,hits=tiles*20,
+    seed_mode=host_report['seed_mode'],separation_calculations_retained=True,
     landmarks=128,radius_squared=645,start='Release raw resident PL embeddings',
     finish='Final hit label stored in original order in PL',pl_measured_hz=1e12/period,
     aie_hz=clock['aie_hz'],pl_period_ps=period,events=events,

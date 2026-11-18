@@ -7,6 +7,7 @@ AIE_BUILD ?= /dev/shm/aie-cluster-c$(COLUMNS)
 DATA ?= $(HOME)/aie-landmark-benchmark-data/cluster-real-mixed
 PLATFORM ?= /opt/xilinx/platforms/xilinx_vck5000_gen4x8_qdma_2_202220_1/xilinx_vck5000_gen4x8_qdma_2_202220_1.xpfm
 NATIVE_EVENTS ?= 2
+SEED_MODE ?= normal
 export TMPDIR := $(BUILD)/tmp
 export PYTHONDONTWRITEBYTECODE := 1
 .DEFAULT_GOAL := aie
@@ -56,9 +57,9 @@ package:
 	cd $(BUILD)/system && emconfigutil --platform $(PLATFORM) --od .
 	python3 $(ROOT)/array/tools/check_package.py $(BUILD)
 emu:
-	COLUMNS=$(COLUMNS) BUILD=$(BUILD) DATA=$(DATA) bash $(ROOT)/array/run_emu.sh
+	COLUMNS=$(COLUMNS) BUILD=$(BUILD) DATA=$(DATA) SEED_MODE=$(SEED_MODE) bash $(ROOT)/array/run_emu.sh
 pl-trace:
-	python3 $(ROOT)/array/tools/check_pl_trace.py $(DATA) $(BUILD)
+	python3 $(ROOT)/array/tools/check_pl_trace.py $(DATA) $(BUILD) $(SEED_MODE)
 
 seed-test: configure
 	mkdir -p $(BUILD)/seed-test

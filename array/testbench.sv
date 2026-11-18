@@ -26,6 +26,8 @@ module array_tb;
  reg [31:0] frames[0:6143],golden[0:331775],sums[0:127],column_sums[0:C*128-1];
  reg [31:0] headers[0:C*10-1];
  reg [31:0] expected_cluster[0:1479],landmark_ids[0:511];
+ reg [31:0] expected_normal[0:1479],expected_forced[0:1479];
+ reg test_forced;
  integer current_frame=0,tick=0;
  integer phase[0:C-1],tx_row[0:C-1],packet_word[0:C-1],controls[0:C-1];
  reg [C-1:0] inputs_done=0,held=0;
@@ -154,11 +156,14 @@ module array_tb;
   if(!$value$plusargs("DATA=%s",path)) $fatal(1,"DATA required");
   $sformat(input_path,"%0s/payloads.mem",path);$sformat(expected_path,"%0s/expected.mem",path);
   $readmemh(input_path,frames);$readmemh(expected_path,golden);
-  $sformat(expected_path,"%0s/cluster_expected.mem",path);$readmemh(expected_path,expected_cluster);
+  $sformat(expected_path,"%0s/cluster_expected.mem",path);$readmemh(expected_path,expected_normal);
+  $sformat(expected_path,"%0s/cluster_expected-force64.mem",path);$readmemh(expected_path,expected_forced);
   $sformat(expected_path,"%0s/landmark_ids.mem",path);$readmemh(expected_path,landmark_ids);
   for(integer j=0;j<6144;j=j+1) if(^frames[j]===1'bx) $fatal(1,"Missing input word");
   for(integer j=0;j<331776;j=j+1) if(^golden[j]===1'bx) $fatal(1,"Missing reference word");
   repeat(5) @(negedge clk);resetn=1;write_reg(0,1,1);
+  read_reg(16'h40,value);if(value!==0) $fatal(1,"Forced mode enabled by default");
+  write_reg(16'h40,2,1);
   for(integer col=0;col<C;col=col+1) begin
    for(integer j=0;j<10;j=j+1) begin
     headers[col*10+j]=header((j*7+3+col)%32,j>=9?2:0);
@@ -166,8 +171,11 @@ module array_tb;
    end
    for(integer j=0;j<8;j=j+1) write_reg(16'h4a0+col*256+j*4,output_id(col,j));
   end
-  for(integer trial=0;trial<2;trial=trial+1) begin
-   current_frame=trial;
+  for(integer trial=0;trial<4;trial=trial+1) begin
+   current_frame=trial%2;test_forced=(trial==1 || trial==2);
+   for(integer j=0;j<1480;j=j+1) expected_cluster[j]=test_forced?expected_forced[j]:expected_normal[j];
+   write_reg(16'h40,test_forced);
+   read_reg(16'h40,value);if(value!==test_forced) $fatal(1,"Seed mode readback mismatch");
    if(trial==0) write_reg(0,2); // The next event must overwrite all old partial/final sums.
    for(integer j=0;j<128;j=j+1) sums[j]=0;
    for(integer col=0;col<C;col=col+1) begin
@@ -188,6 +196,8 @@ module array_tb;
    write_reg(0,1,1);if(dut.busy) $fatal(1,"Partially loaded array released");
    write_reg(16'h8000+(C-1)*4096+575*4,frames[current_frame*1536+1535]);
    write_reg(0,1);write_reg(16'h8000,32'hbadbad00,1);
+   write_reg(16'h40,!test_forced,1);
+   read_reg(16'h40,value);if(value!==test_forced) $fatal(1,"Seed mode changed while busy");
    wait(dut.cluster_done);
    read_reg(16'h10,timed_cycles);
    if(timed_cycles!==(finish_time-release_time)/10) $fatal(1,"Global counter endpoint mismatch");
@@ -199,7 +209,7 @@ module array_tb;
     end
    end
    read_reg(4,value);if(value!==62) $fatal(1,"Completion/load-guard status mismatch: %h",value);
-   read_reg(16'h3c,value);if(value!==expected_cluster[current_frame*370+128]) $fatal(1,"Seed metadata mismatch");
+   read_reg(16'h3c,value);if(value!==(expected_cluster[current_frame*370+128]|(expected_cluster[current_frame*370+129]<<7))) $fatal(1,"Seed metadata mismatch");
    for(integer j=0;j<16;j=j+1) begin
     read_reg(16'h2400+j*4,value);if(value!==expected_cluster[current_frame*370+130+j]) $fatal(1,"Seed slots mismatch");
    end
@@ -210,11 +220,11 @@ module array_tb;
     read_reg(16'h1000+j*4,value);if(value!==expected_cluster[current_frame*370+210+j]) $fatal(1,"Original-order label mismatch");
    end
    for(integer col=0;col<C;col=col+1) begin
-    read_reg(16'h400+col*256,value);if(value!==154) $fatal(1,"Column TX beat count");
+    read_reg(16'h400+col*256,value);if(value!==(test_forced?158:154)) $fatal(1,"Column TX beat count");
     read_reg(16'h404+col*256,value);if(value!==88) $fatal(1,"Column RX beat count");
    end
    read_reg(16'h10,value);if(value!==timed_cycles) $fatal(1,"Timer changed during readback");
-   $display("PASS array RTL: %0d columns, fixture %0d",C,trial);
+   $display("PASS array RTL: %0d columns, fixture %0d, force64 %0d",C,current_frame,test_forced);
   end
   $display("PASS: four-column clustering, seeds, identity table, labels, skew, reverse tile order, backpressure, load guards and exact timer boundaries");
   $finish;

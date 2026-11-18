@@ -2,7 +2,7 @@
 // Equivalent to density sorting followed by greedy separation checks:
 // select the best active candidate and suppress all close neighbors in parallel.
 module seed_select (
- input wire clk, rst_n, start,
+ input wire clk, rst_n, start, force_64,
  input wire [4095:0] densities,
  input wire [8191:0] landmarks,
  input wire [4095:0] landmark_hit_ids,
@@ -17,6 +17,7 @@ module seed_select (
  reg [3:0] wait_cycles, phase;
  reg [6:0] chosen;
  reg [9:0] maximum;
+ reg forced;
  // Valid, density (<=640), inverted slot for lowest-ID ties.
  wire [17:0] leaf [0:127];
  reg [17:0] tree [1:127];
@@ -36,21 +37,23 @@ module seed_select (
  reg [19:0] squared[0:127];
  wire [127:0] remaining;
  generate for(genvar i=0;i<128;i=i+1) begin: separation
-  assign remaining[i]=active[i] && squared[i]>=20'd3267 && i!=chosen;
+  // Stress mode retains every distance pass but overrides neighbor rejection.
+  assign remaining[i]=active[i] && (forced || squared[i]>=20'd3267) && i!=chosen;
  end endgenerate
  integer i;
  always @(posedge clk) begin
   if(!rst_n) begin
    state<=IDLE;done<=0;overflow<=0;seed_count<=0;seed_slots<=0;seed_hit_ids<=0;
-   active<=0;wait_cycles<=0;phase<=0;chosen<=0;maximum<=0;
+   active<=0;wait_cycles<=0;phase<=0;chosen<=0;maximum<=0;forced<=0;
   end else if(start) begin
    state<=INITIAL;active<=~128'b0;wait_cycles<=7;done<=0;overflow<=0;
    seed_count<=0;seed_slots<=0;seed_hit_ids<=0;
+   forced<=force_64;
   end else case(state)
    INITIAL: if(wait_cycles!=0) wait_cycles<=wait_cycles-1;
     else begin maximum<=tree[1][16:7];state<=ELIGIBLE;end
    ELIGIBLE: begin
-    for(i=0;i<128;i=i+1) active[i]<=({3'b0,densities[i*32+:10]}*13'd5 >= maximum);
+    for(i=0;i<128;i=i+1) active[i]<=forced || ({3'b0,densities[i*32+:10]}*13'd5 >= maximum);
     wait_cycles<=7;state<=PICK;
    end
    PICK: if(wait_cycles!=0) wait_cycles<=wait_cycles-1;

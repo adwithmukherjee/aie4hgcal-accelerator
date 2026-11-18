@@ -37,6 +37,25 @@ Code generation checks require spill-free assignment loops of at most 12 issue
 bundles and retain the qualified 13-bundle distance loops.
 No distance matrix is copied back to PL; the cache remains on AIE for assignment.
 
+## Forced 64-seed latency benchmark
+
+Normal clustering remains the default. Writing `1` to register `0x0040` while
+idle enables a stress mode that selects exactly 64 distinct landmarks in density
+rank order, with the same original-hit-ID tie rule. It bypasses the density
+cutoff and separation rejection, while retaining all 64 selection iterations
+and their actual separation-distance calculations. No seeds are preselected on
+the host. The mode is latched for selection and cannot be changed while busy.
+All 32 AIE tiles receive the same 64 IDs and assign their 20 hits against them.
+
+This is a workload stress test, not a reconstruction-quality result. The cap
+overflow flag is set because 64 other candidates remain under the forced rules.
+There can be fewer than 64 nonempty clusters even though 64 seeds are selected.
+The normal timing endpoints and all communication stay inside the sole timer.
+
+Use `SEED_MODE=force64` for `emu` and `pl-trace`, or pass `--force-64` as the last
+argument to `array_host`. Results are kept in `system/results-force64`; normal
+mode uses `system/results-normal`. Runtime directories also distinguish modes.
+
 Each column multicasts one seed packet to all eight workers. The packet contains
 a header, seed count, and four byte-sized landmark slots per subsequent word.
 Each worker returns a header and five words containing its 20 byte labels.
@@ -54,14 +73,18 @@ source env.sh
 export DATA=$HOME/aie-landmark-benchmark-data/cluster-real-mixed
 # DATA initially contains the original four density payloads/manifest/RTL oracle.
 python3 array/tools/clustering_reference.py "$DATA" "$DATA"
+python3 array/tools/clustering_reference.py "$DATA" "$DATA" --force-64
 make -f array/Makefile seed-test rtl-test host xo
 make -f array/Makefile aie
 make -f array/Makefile aie-gate-test aie-cap-test aie-sim
 make -f array/Makefile link package
 make -f array/Makefile emu pl-trace
+# Or stress exactly 64 selected seeds on the same real inputs:
+make -f array/Makefile emu pl-trace SEED_MODE=force64
 ```
 
-The selector test covers threshold equality, density ties, signed endpoints,
+The selector test covers normal/forced transitions, all 64 separation passes,
+threshold equality, density ties, signed endpoints,
 duplicate landmarks, zero densities, 64-seed saturation, and repeated events.
 The RTL system test checks independent backpressure, skew, reverse tile return
 order, seeds, seed identities, labels, load guards, and the exact final-write
@@ -90,8 +113,9 @@ The control aperture remains 64 KiB. All offsets are bytes.
 | `0x0008` | Column count (4) |
 | `0x0010/14` | Complete latency in PL clocks, low/high |
 | `0x0028/2c` | Column density/label completion masks |
-| `0x0034/38` | Signature `0x434c5331`, density squared threshold 645 |
+| `0x0034/38` | Signature `0x434c5332`, density squared threshold 645 |
 | `0x003c` | Seed count (bits 0–6), overflow (bit 7) |
+| `0x0040` | Read/write seed mode while idle: 0 normal, 1 force 64 |
 | `0x0400+c*0x100` | Column TX/RX beats, tile density/label masks |
 | `0x0440+c*0x100` | Ten compiled routing headers: eight hits, landmarks, seeds |
 | `0x04a0+c*0x100` | Eight compiled output packet IDs |

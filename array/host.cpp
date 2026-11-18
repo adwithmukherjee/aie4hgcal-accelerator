@@ -35,7 +35,9 @@ static void save(const fs::path& path,const std::vector<uint32_t>& data) {
 
 int main(int argc,char** argv) {
  try {
-    if(argc!=6) throw std::runtime_error("Usage: array_host design.xclbin data config results columns");
+    if(argc!=6 && !(argc==7 && std::string(argv[6])=="--force-64"))
+        throw std::runtime_error("Usage: array_host design.xclbin data config results columns [--force-64]");
+    const bool force_64=argc==7;
     const unsigned columns=std::stoul(argv[5]);
     const unsigned tiles=columns*8;
     if(columns!=4) throw std::runtime_error("Invalid column count");
@@ -50,12 +52,13 @@ int main(int argc,char** argv) {
     const char* mode=std::getenv("XCL_EMULATION_MODE");
     if(mode && std::string(mode)!="hw_emu") throw std::runtime_error("Use hw_emu or unset XCL_EMULATION_MODE");
     std::ofstream report(fs::path(argv[4])/"events.json");
-    report<<"{\"measurement\":\""<<(mode?mode:"physical_board")<<"\",\"columns\":"<<columns<<",\"events\":[\n";
+    report<<"{\"measurement\":\""<<(mode?mode:"physical_board")<<"\",\"columns\":"<<columns
+          <<",\"seed_mode\":\""<<(force_64?"force64_density_rank":"normal")<<"\",\"events\":[\n";
     xrt::device device(0);
     auto uuid=device.load_xclbin(argv[1]);
     xrt::ip pl(device,uuid,"array_pl:{array_pl_1}");
     const auto signature=pl.read_register(0x34),radius=pl.read_register(0x38);
-    if(signature!=0x434c5331 || radius!=645) {
+    if(signature!=0x434c5332 || radius!=645) {
         std::ostringstream error;
         error<<"Wrong array register map: signature=0x"<<std::hex<<signature<<", radius=0x"<<radius;
         throw std::runtime_error(error.str());
@@ -92,6 +95,8 @@ int main(int argc,char** argv) {
         write_words(0x4a0+c*0x100,ids.data()+c*8,8);
     }
     if(pl.read_register(8)!=columns) throw std::runtime_error("Compiled column count differs");
+    pl.write_register(0x40,force_64);
+    if(pl.read_register(0x40)!=unsigned(force_64)) throw std::runtime_error("Seed benchmark mode mismatch");
     for(unsigned event=0;event<frames.size()/1536;++event) {
         const uint32_t* frame=frames.data()+event*1536;
         std::vector<int8_t> coordinates(6144);std::memcpy(coordinates.data(),frame,6144);
@@ -115,7 +120,10 @@ int main(int argc,char** argv) {
         std::stable_sort(order.begin(),order.end(),[&](unsigned a,unsigned b){return expected_density[a]>expected_density[b];});
         const auto maximum=*std::max_element(expected_density.begin(),expected_density.end());
         bool overflow=false;
-        for(auto candidate:order) {
+        if(force_64) {
+            seeds.assign(order.begin(),order.begin()+64);
+            overflow=true; // 64 additional candidates remain under the forced rules.
+        } else for(auto candidate:order) {
             if(5*expected_density[candidate]<maximum) continue;
             bool separated=true;
             for(auto seed:seeds) {
