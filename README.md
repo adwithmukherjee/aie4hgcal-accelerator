@@ -2,6 +2,8 @@
 
 The [one-column benchmark](column/README.md) extends this implementation to
 1, 2, 4 and 8 workers with shared packet transport and PL density accumulation.
+The [parallel-column benchmark](array/README.md) adds two and four full columns,
+independent streams, and a timed final PL reduction across columns.
 
 For 20 hits and 128 landmarks, each an 8D signed INT8 embedding, compute all
 2,560 squared distances, cache them as INT32, and count hits satisfying

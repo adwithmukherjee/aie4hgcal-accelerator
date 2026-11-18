@@ -1,0 +1,61 @@
+SHELL := /bin/bash
+.SHELLFLAGS := -e -o pipefail -c
+ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
+COLUMNS ?= 4
+BUILD ?= $(HOME)/aie-array-builds/c$(COLUMNS)
+AIE_BUILD ?= /dev/shm/aie-array-c$(COLUMNS)
+DATA ?= $(HOME)/aie-landmark-benchmark-data/array-real-mixed
+PLATFORM ?= /opt/xilinx/platforms/xilinx_vck5000_gen4x8_qdma_2_202220_1/xilinx_vck5000_gen4x8_qdma_2_202220_1.xpfm
+NATIVE_EVENTS ?= 2
+export TMPDIR := $(BUILD)/tmp
+export PYTHONDONTWRITEBYTECODE := 1
+.DEFAULT_GOAL := aie
+.PHONY: configure aie codegen aie-sim aie-gate-test rtl-test xo host link package emu pl-trace
+configure:
+	mkdir -p $(BUILD)/tmp $(BUILD)/aie
+	python3 $(ROOT)/array/tools/configure.py $(BUILD) $(COLUMNS)
+aie: configure
+	mkdir -p $(AIE_BUILD)/aie
+	cp $(BUILD)/config/constraints.json $(AIE_BUILD)/constraints.json
+	cd $(AIE_BUILD)/aie && aiecompiler --target=hw --platform=$(PLATFORM) --stacksize=16384 --heapsize=2048 --pl-freq=300 --constraints=$(AIE_BUILD)/constraints.json --Xpreproc=-DARRAY_COLUMNS=$(COLUMNS) --include=$(ROOT)/include --include=$(ROOT)/aie --include=$(ROOT)/array --workdir=Work --output-archive=$(AIE_BUILD)/libadf.a $(ROOT)/array/graph.cpp > compile.log 2>&1
+	cp $(AIE_BUILD)/libadf.a $(BUILD)/libadf.a
+	rsync -a $(AIE_BUILD)/aie/ $(BUILD)/aie/
+	grep -q 'Compilation Complete' $(BUILD)/aie/compile.log
+	python3 $(ROOT)/array/tools/packet_map.py $(BUILD)
+	python3 $(ROOT)/array/tools/check_codegen.py $(BUILD)
+codegen:
+	python3 $(ROOT)/array/tools/packet_map.py $(BUILD)
+	python3 $(ROOT)/array/tools/check_codegen.py $(BUILD)
+aie-sim:
+	python3 $(ROOT)/array/tools/make_input.py $(DATA) $(BUILD) --events $(NATIVE_EVENTS)
+	cd $(BUILD)/aie && DENSITY_EVENTS=$(NATIVE_EVENTS) aiesimulator --pkg-dir=Work --output-dir=$(BUILD)/aie/native-real --output-time-stamp=no > simulate.log 2>&1
+	python3 $(ROOT)/array/tools/check_aie.py $(DATA) $(BUILD)/aie/native-real $(BUILD)/config/packet_map.json --events $(NATIVE_EVENTS)
+aie-gate-test:
+	python3 $(ROOT)/array/tools/make_input.py $(DATA) $(BUILD) --gated
+	cd $(BUILD)/aie && DENSITY_EVENTS=1 aiesimulator --pkg-dir=Work --output-dir=$(BUILD)/aie/native-gated --output-time-stamp=yes --simulation-cycle-timeout=25000 > simulate-gated.log 2>&1
+	python3 $(ROOT)/array/tools/check_aie.py $(DATA) $(BUILD)/aie/native-gated $(BUILD)/config/packet_map.json --gated
+rtl-test: configure
+	mkdir -p $(BUILD)/rtl-test
+	cd $(BUILD)/rtl-test && xvlog --sv --define TEST_COLUMNS=$(COLUMNS) $(ROOT)/array/column_lane.sv $(ROOT)/array/control.sv $(ROOT)/array/testbench.sv
+	cd $(BUILD)/rtl-test && xelab array_tb -s array_tb --debug typical
+	cd $(BUILD)/rtl-test && xsim array_tb -runall --testplusarg DATA=$(DATA) 2>&1 | tee test.log
+	grep -q 'PASS: independent columns and global PL reduction' $(BUILD)/rtl-test/test.log
+xo: configure
+	mkdir -p $(BUILD)/pl
+	cd $(BUILD)/pl && vivado -mode batch -source $(ROOT)/array/package.tcl -tclargs $(ROOT) $(BUILD) $(COLUMNS) > package.log 2>&1
+	test -f $(BUILD)/array_pl.xo
+host:
+	g++ -std=c++17 -O2 -Wall -Wextra -I/opt/xilinx/xrt/include $(ROOT)/array/host.cpp -L/opt/xilinx/xrt/lib -lxrt_coreutil -ldl -o $(BUILD)/array_host
+link: codegen
+	mkdir -p $(BUILD)/system
+	cd $(BUILD)/system && v++ -l -g --save-temps -t hw_emu --platform $(PLATFORM) --kernel_frequency 300 --config $(BUILD)/config/connectivity.cfg --temp_dir link -o array.xsa $(BUILD)/array_pl.xo $(BUILD)/libadf.a > link.log 2>&1
+	python3 $(ROOT)/tools/capture_clock.py $(BUILD)
+package:
+	cd $(BUILD)/system && v++ -p -t hw_emu --platform $(PLATFORM) --package.boot_mode=ospi -o array.xclbin array.xsa $(BUILD)/libadf.a > package.log 2>&1
+	! grep -q '^ERROR:' $(BUILD)/system/package.log
+	cd $(BUILD)/system && emconfigutil --platform $(PLATFORM) --od .
+	python3 $(ROOT)/array/tools/check_package.py $(BUILD)
+emu:
+	COLUMNS=$(COLUMNS) BUILD=$(BUILD) DATA=$(DATA) bash $(ROOT)/array/run_emu.sh
+pl-trace:
+	python3 $(ROOT)/array/tools/check_pl_trace.py $(DATA) $(BUILD)
