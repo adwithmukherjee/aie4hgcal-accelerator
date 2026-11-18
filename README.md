@@ -1,5 +1,8 @@
 # Single-tile distance and landmark-density benchmark
 
+The [one-column benchmark](column/README.md) extends this implementation to
+1, 2, 4 and 8 workers with shared packet transport and PL density accumulation.
+
 For 20 hits and 128 landmarks, each an 8D signed INT8 embedding, compute all
 2,560 squared distances, cache them as INT32, and count hits satisfying
 `distance_squared <= 645` for each landmark. This is the agreed inclusive
