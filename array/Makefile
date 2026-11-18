@@ -4,6 +4,7 @@ ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 COLUMNS ?= 4
 BUILD ?= $(HOME)/aie-cluster-builds/c$(COLUMNS)
 AIE_BUILD ?= /dev/shm/aie-cluster-c$(COLUMNS)
+AIE_JOBS ?= 2
 DATA ?= $(HOME)/aie-landmark-benchmark-data/cluster-real-mixed
 PLATFORM ?= /opt/xilinx/platforms/xilinx_vck5000_gen4x8_qdma_2_202220_1/xilinx_vck5000_gen4x8_qdma_2_202220_1.xpfm
 NATIVE_EVENTS ?= 2
@@ -11,14 +12,14 @@ SEED_MODE ?= normal
 export TMPDIR := $(BUILD)/tmp
 export PYTHONDONTWRITEBYTECODE := 1
 .DEFAULT_GOAL := aie
-.PHONY: configure aie codegen aie-sim aie-gate-test aie-cap-test seed-test rtl-test xo host link package emu pl-trace
+.PHONY: configure aie codegen aie-sim aie-gate-test aie-cap-test aie-shortlist-test aie-force64-test seed-test rtl-test xo host link package emu pl-trace
 configure:
 	mkdir -p $(BUILD)/tmp $(BUILD)/aie
 	python3 $(ROOT)/array/tools/configure.py $(BUILD) $(COLUMNS)
 aie: configure
 	mkdir -p $(AIE_BUILD)/aie
 	cp $(BUILD)/config/constraints.json $(AIE_BUILD)/constraints.json
-	cd $(AIE_BUILD)/aie && aiecompiler --target=hw --platform=$(PLATFORM) --stacksize=16384 --heapsize=2048 --pl-freq=300 --constraints=$(AIE_BUILD)/constraints.json --Xpreproc=-DARRAY_COLUMNS=$(COLUMNS) --include=$(ROOT)/include --include=$(ROOT)/aie --include=$(ROOT)/array --workdir=Work --output-archive=$(AIE_BUILD)/libadf.a $(ROOT)/array/graph.cpp > compile.log 2>&1
+	cd $(AIE_BUILD)/aie && aiecompiler --target=hw --platform=$(PLATFORM) --stacksize=20480 --heapsize=2048 --pl-freq=300 --Xelfgen=-j$(AIE_JOBS) --constraints=$(AIE_BUILD)/constraints.json --Xpreproc=-DARRAY_COLUMNS=$(COLUMNS) --include=$(ROOT)/include --include=$(ROOT)/aie --include=$(ROOT)/array --workdir=Work --output-archive=$(AIE_BUILD)/libadf.a $(ROOT)/array/graph.cpp > compile.log 2>&1
 	cp $(AIE_BUILD)/libadf.a $(BUILD)/libadf.a
 	rsync -a $(AIE_BUILD)/aie/ $(BUILD)/aie/
 	grep -q 'Compilation Complete' $(BUILD)/aie/compile.log
@@ -72,3 +73,13 @@ aie-cap-test:
 	python3 $(ROOT)/array/tools/make_input.py $(DATA) $(BUILD) --events 2 --assignment-count 64 --ties-last
 	cd $(BUILD)/aie && DENSITY_EVENTS=2 aiesimulator --pkg-dir=Work --output-dir=$(BUILD)/aie/native-cap --output-time-stamp=no > simulate-cap.log 2>&1
 	python3 $(ROOT)/array/tools/check_aie.py $(DATA) $(BUILD)/aie/native-cap $(BUILD)/config/packet_map.json --events 2 --assignment-count 64 --ties-last
+
+aie-shortlist-test:
+	python3 $(ROOT)/array/tools/make_input.py $(DATA) $(BUILD) --events 4 --assignment-cases
+	cd $(BUILD)/aie && DENSITY_EVENTS=4 aiesimulator --pkg-dir=Work --output-dir=$(BUILD)/aie/native-shortlist --output-time-stamp=no > simulate-shortlist.log 2>&1
+	python3 $(ROOT)/array/tools/check_aie.py $(DATA) $(BUILD)/aie/native-shortlist $(BUILD)/config/packet_map.json --events 4 --assignment-cases
+
+aie-force64-test:
+	python3 $(ROOT)/array/tools/make_input.py $(DATA) $(BUILD) --events 2 --force-64
+	cd $(BUILD)/aie && DENSITY_EVENTS=2 aiesimulator --pkg-dir=Work --output-dir=$(BUILD)/aie/native-force64 --output-time-stamp=yes > simulate-force64.log 2>&1
+	python3 $(ROOT)/array/tools/check_aie.py $(DATA) $(BUILD)/aie/native-force64 $(BUILD)/config/packet_map.json --events 2 --force-64

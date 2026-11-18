@@ -36,10 +36,28 @@ The seven-stage maximum tree then selects the best unsuppressed candidate; a
 synchronous table read supplies its suppression mask on the next clock. Selection
 waits for the current event table if densities arrive early. Every row is
 overwritten each event, and no precomputation is moved outside the timer. AIE
-uses native 32-bit vector shuffles and fused minimum/compare operations on four
-hits at a time. The 1–3 seed cases are unrolled; the larger seed loop is pipelined.
-Code generation checks require spill-free assignment loops of at most 12 issue
-bundles and retain the qualified 13-bundle distance loops.
+prepares the nearest 32 landmarks per hit after emitting its density packet and
+before reading the seed packet. Native 32-bit compare/shuffle operations sort
+packed `(squared_distance << 7) | landmark_slot` keys; four sorted blocks of 32
+are merged while retaining only the nearest 32. A block is skipped only when its
+smallest packed key cannot enter the current nearest-32 set. The exact distance cache remains
+intact. Preparation is inside the timer and can overlap PL selection; any excess
+preparation time remains on the critical path.
+
+After seeds arrive, a 128-entry slot-to-label table supports an early-exit search
+through each shortlist. The entire nearest selected distance group is checked
+to preserve seed-order ties. A missing seed or a winner at the shortlist cutoff
+invokes the original four-hit vector scan, so an omitted equal-distance seed
+cannot change the answer. The slowest tile still determines full-event latency.
+The fallback uses unrolled 1–3-seed handling or the pipelined larger-seed loop.
+The native sorting and merging functions store intermediate halves explicitly
+in SRAM so separate networks can reuse AIE1 vector registers. Code-generation
+checks reject scalar shuffle helpers, unexpected calls, and spills inside those
+networks. They retain the 13-bundle density and 12-bundle fallback loop limits
+and report the preparation control code, including call and spill overhead.
+The 20 KiB stack reservation is checked against the complete dispatcher, kernel,
+preparation, and network call chain using each tile’s linker map.
+All helper execution and SRAM traffic remain inside the same benchmark timer.
 No distance matrix is copied back to PL; the cache remains on AIE for assignment.
 
 ## Forced 64-seed latency benchmark
@@ -70,7 +88,8 @@ The four column receivers gather independently, including under backpressure.
 ## Validation and reproduction
 
 Use Vitis 2022.2 and the VCK5000 QDMA platform. `COLUMNS=4` is required. Paths can
-be overridden with `BUILD`, `AIE_BUILD`, and `DATA`. The source uses separate
+be overridden with `BUILD`, `AIE_BUILD`, and `DATA`. `AIE_JOBS=2` limits
+concurrent ELF compiler workers to avoid exhausting the build VM memory. The source uses separate
 clustering build/runtime directories, preserving the earlier density artifacts.
 
 ```bash
@@ -81,7 +100,7 @@ python3 array/tools/clustering_reference.py "$DATA" "$DATA"
 python3 array/tools/clustering_reference.py "$DATA" "$DATA" --force-64
 make -f array/Makefile seed-test rtl-test host xo
 make -f array/Makefile aie
-make -f array/Makefile aie-gate-test aie-cap-test aie-sim
+make -f array/Makefile aie-gate-test aie-shortlist-test aie-sim aie-force64-test
 make -f array/Makefile link package
 make -f array/Makefile emu pl-trace
 # Or stress exactly 64 selected seeds on the same real inputs:
@@ -95,8 +114,11 @@ duplicate landmarks, zero densities, 64-seed saturation, and repeated events.
 The RTL system test checks independent backpressure, skew, reverse tile return
 order, seeds, seed identities, labels, load guards, and the exact final-write
 counter endpoint. Native AIE tests cover real event-derived seeds, withholding
-seed packets, and 64 supplied seed IDs on real embeddings plus a synthetic all-tied event. The latter is an
-assignment-capacity test, not an algorithm-selected 64-seed performance claim.
+seed packets, and 64 supplied seed IDs on real embeddings plus a synthetic all-tied event. The shortlist qualification also covers an empty shortlist intersection, a
+winning tie outside the cutoff, seed-order ties inside the shortlist, and signed
+INT8 extremes. `aie-force64-test` checks the real density-ranked 64-seed lists
+against the CPU oracle, outside the integrated performance run. Native checks
+establish correctness; their timestamps are not the PL-to-PL benchmark.
 The integrated host independently computes every final output using scalar CPU
 integer arithmetic; the trace checker also verifies every stream payload and
 the complete timer interval. No substage timers are added.

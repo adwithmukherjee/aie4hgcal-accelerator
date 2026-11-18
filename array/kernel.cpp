@@ -1,4 +1,5 @@
 #include "density_core.hpp"
+#include "shortlist.hpp"
 
 static inline __attribute__((always_inline))
 void update_label(const int32* cache,unsigned landmark,unsigned seed,V4& best,V4& label) {
@@ -17,23 +18,39 @@ void column_density(input_window<int32>* hits, input_window<int32>* landmarks,
     alignas(32) int32 cache[density::distances];
     alignas(32) uint32_t counts[32];
     alignas(32) int32 seed_ids[64];
+    alignas(32) int32 seed_ranks[128];
+    alignas(32) int32 nearest[20*shortlist::size];
     alignas(32) int32 labels[20];
     prepare_density(reinterpret_cast<const int8*>(hits->ptr),
                     reinterpret_cast<const int8*>(landmarks->ptr), cache, counts);
     const unsigned id = getPacketid(output, 0);
     writeHeader(output, 0, id);
     for (unsigned r=0; r<32; ++r) writeincr(output, int32(counts[r]), r==31);
-    // Reuse the exact distances already resident in this tile.
+    // Overlap shortlist preparation with PL selection, after emitting densities.
+    chess_separator_scheduler();
+    shortlist::prepare(cache,nearest);
+    for(unsigned s=0;s<128;s+=16)
+        aie::store_v(seed_ranks+s,aie::broadcast<int32,16>(127));
     chess_separator_scheduler();
     readincr(control); // packet header
     const unsigned count=unsigned(readincr(control));
     for (unsigned word=0; word<(count+3)/4; ++word) {
         const uint32_t packed=uint32_t(readincr(control));
-        for (unsigned lane=0; lane<4; ++lane)
+        for (unsigned lane=0; lane<4; ++lane) {
             seed_ids[word*4+lane]=(packed>>(lane*8))&127;
+            if(word*4+lane<count) seed_ranks[seed_ids[word*4+lane]]=word*4+lane;
+        }
     }
     chess_separator_scheduler();
     for (unsigned h=0; h<5; ++h) {
+        bool fallback=false;
+        for(unsigned lane=0;lane<4;++lane) {
+            const int label=shortlist::lookup(nearest+(h*4+lane)*32,seed_ranks);
+            labels[h*4+lane]=label;
+            fallback|=label<0;
+        }
+        if(!fallback) continue;
+        // One unresolved lane invokes the original vector scan for four hits.
         V4 best=aie::broadcast<int32,4>(0x7fffffff);
         V4 label=aie::zeros<int32,4>();
         // Avoid the compiler's serial short-trip loop for 1-3 seeds.
