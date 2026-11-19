@@ -9,6 +9,10 @@ The [PL KAN encoder benchmark](kan/README.md) provides the pinned four-byte
 hardware-emulation capture harness. Its output interface is separate from the
 AIE transport.
 
+The [streaming KAN and clustering benchmark](kan_cluster/README.md) joins
+64 PL lanes to the 32-tile AIE graph. It encodes 8,000 resident raw hits and
+streams 640 hit embeddings plus 128 landmarks while encoding continues.
+
 The density baseline uses two and four full columns,
 independent streams, and a timed final PL reduction across columns.
 
