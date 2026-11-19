@@ -4,6 +4,11 @@ The [one-column benchmark](column/README.md) extends this implementation to
 1, 2, 4 and 8 workers with shared packet transport and PL density accumulation.
 The [four-column clustering benchmark](array/README.md) extends density through seed selection and cached hit assignment. The earlier density-only two/four-column benchmark is preserved at commit `01628a1`.
 
+The [PL KAN encoder benchmark](kan/README.md) provides the pinned four-byte
+4 → 12 → 8 encoder, register-fed streaming lanes and a standalone VCK5000
+hardware-emulation capture harness. Its output interface is separate from the
+AIE transport.
+
 The density baseline uses two and four full columns,
 independent streams, and a timed final PL reduction across columns.
 

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -eo pipefail
+# The 2022.2 NoC model otherwise writes 14 GiB of zeros before XRT can
+# connect (XRT's connection timeout is hard-coded to 300 wall-clock seconds).
+# Existing backing files may contain boot data and must never be overwritten.
+# Sparse zero-filled files have identical read semantics; no simulated cycle
+# has run yet. Sizes and filenames come from the packaged platform metadata.
+if [[ "${1:-}" == design_1_wrapper_sim_wrapper_behav && -f emulation_data/noc_memory_config.txt ]]; then
+  python3 - <<'PY'
+import csv
+from pathlib import Path
+for name, address, size in csv.reader(Path('emulation_data/noc_memory_config.txt').open()):
+    path=Path(name)
+    if path.name != name or not name.startswith('qemu-memory-'):
+        raise RuntimeError('Unexpected platform memory filename: '+name)
+    try:
+        with path.open('xb') as target:
+            target.truncate(int(size, 0))
+        print('TRANSPORT_EMU: sparse zero-filled backing file',name,size,'bytes',flush=True)
+    except FileExistsError:
+        pass
+PY
+fi
+exec /tools/Xilinx/Vivado/2022.2/bin/xsim "$@"
