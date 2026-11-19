@@ -36,8 +36,10 @@ int main(int argc,char** argv) {
  try {
   if(argc!=5) throw std::runtime_error("Usage: kan_cluster_host design.xclbin data config results");
   const char* mode=std::getenv("XCL_EMULATION_MODE");
-  if(!mode || std::string(mode)!="hw_emu") throw std::runtime_error("This qualification requires hw_emu");
+  const bool emulation=mode && std::string(mode)=="hw_emu";
+  if(mode && *mode && !emulation) throw std::runtime_error("Use hw_emu or unset XCL_EMULATION_MODE for hardware");
   const bool sim_memory=std::getenv("KAN_CLUSTER_SIM_MEMORY") && std::string(std::getenv("KAN_CLUSTER_SIM_MEMORY"))=="1";
+  if(sim_memory && !emulation) throw std::runtime_error("Simulator memory access is unavailable on hardware");
   const fs::path fixture=fs::path(argv[2])/"event-00187",config=argv[3],results=argv[4];
   auto raw=binary_words(fixture/"wire.bin",8000),roles=binary_words(fixture/"roles.bin",768);
   auto landmark_ids=binary_words(fixture/"landmark_ids.bin",128);
@@ -55,7 +57,7 @@ int main(int argc,char** argv) {
   }
   if(!found) throw std::runtime_error("Missing integrated kernel aperture");
   auto close=[](void* p){dlclose(p);};
-  std::unique_ptr<void,decltype(close)> driver(dlopen("libxrt_hwemu.so.2",RTLD_NOW|RTLD_LOCAL),close);
+  std::unique_ptr<void,decltype(close)> driver(dlopen(emulation?"libxrt_hwemu.so.2":"libxrt_core.so.2",RTLD_NOW|RTLD_LOCAL),close);
   if(!driver) throw std::runtime_error(dlerror());
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
@@ -81,7 +83,7 @@ int main(int argc,char** argv) {
   if(ip.read_register(0x1c)!=8000 || ip.read_register(0x20)!=768 || (ip.read_register(4)&8))
    throw std::runtime_error("Incomplete or invalid raw/role load");
   std::ofstream report(results/"events.json");
-  report<<"{\"measurement\":\"VCK5000 hw_emu; resident raw register release to final AIE label capture\","
+  report<<"{\"measurement\":\"VCK5000 "<<(emulation?"hw_emu":"physical_hardware")<<"; resident raw register release to final AIE label capture\","
         <<"\"setup_readback\":\""<<(sim_memory?"simulator_memory_with_AXI_spot_checks":"full_AXI_MMIO")<<"\","
         <<"\"lanes\":64,\"raw_hits\":8000,\"aie_hits\":640,\"aie_tiles\":32,\"events\":[\n";
   for(unsigned trial=0;trial<2;++trial) {

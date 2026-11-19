@@ -150,6 +150,49 @@ and XSim are limited to two workers. These checks measure current headroom;
 they do not reserve resources against other jobs. Completed emulator runtime
 and link scratch can be removed after preserving results and packaged designs.
 
+## Physical hardware build
+
+`TARGET=hw` selects the physical VCK5000 flow. The default remains `hw_emu`.
+The hardware flow reuses the hash-verified hardware-targeted AIE archive and
+runs synthesis, implementation and packaging through Vitis 2022.2:
+
+```sh
+source /home/adwith_mukherjee/lab3/env.sh
+make -j1 -C kan_cluster BUILD=/absolute/hardware/build TARGET=hw hardware
+```
+
+Prepare the pinned generated ROMs in that build directory first, as in the
+reproduction instructions. Keep the hardware build separate from emulation.
+Defaults are one synthesis job, one implementation job and two maximum Vivado
+threads. Hardware builds omit emulator clock-model extraction and `emconfigutil`.
+Successful emulation does not establish physical fit or timing closure.
+
+On the original 32 GB VM, run the build inside a system-level systemd service
+with `MemoryAccounting=yes`, `MemoryMax=24G` and `KillMode=control-group`, using
+the normal user account. Verify `memory.limit_in_bytes` on the actual memory
+controller: user-level systemd units on this VM do not enforce that controller.
+The build watchdog is invoked inside that service:
+
+```sh
+python3 kan_cluster/tools/watch_build.py \
+  --build /absolute/hardware/build --lock "$HOME/.fpga-build.lock" \
+  --reserve-memory-gib 6 --max-anon-gib 22 --min-free-disk-gib 2 \
+  -- /bin/bash /absolute/build-driver.sh
+```
+
+The driver sources the lab environment and invokes the hardware target above.
+The watchdog samples every second, holds a shared build lock, refuses to start
+alongside an existing compiler/emulator, and stops its own process tree when
+a configured resource threshold is reached. `guard-state.json` and
+`memory.csv` retain current status, resource peaks and stop reasons. These soft
+stops supplement the independently enforced 24 GiB limit. The hard limit can
+terminate the build if allocation grows faster than the watchdog can react.
+
+The host supports physical execution with `XCL_EMULATION_MODE` and
+`KAN_CLUSTER_SIM_MEMORY` unset. That path uses the physical XRT backend and full
+AXI loading/readback, with no simulator memory access. Physical execution is
+still unqualified until run on a matching card-equipped host.
+
 ## Control map
 
 The kernel is user managed with an 18-bit, 256 KiB AXI-Lite aperture.
