@@ -1,74 +1,49 @@
 #include "density_core.hpp"
-#include "shortlist.hpp"
-
-static inline __attribute__((always_inline))
-void update_label(const int32* cache,unsigned landmark,unsigned seed,V4& best,V4& label) {
-    const V16 block=aie::load_v<16>(cache+(landmark/4)*16);
-    const V16 gathered=::shuffle16(block,landmark&3,0x0000c840,0);
-    const V4 squared=gathered.extract<4>(0);
-    // min_cmp also returns a >= b: equality preserves the earlier seed.
-    auto [minimum,keep_old]=aie::min_cmp(squared,best);
-    best=minimum;
-    label=aie::select(aie::broadcast<int32,4>(seed),label,keep_old);
-}
-
+#include "assignment.hpp"
 
 void column_density(input_window<int32>* hits, input_window<int32>* landmarks,
                     input_pktstream* control, output_pktstream* output) {
     alignas(32) int32 cache[density::distances];
     alignas(32) uint32_t counts[32];
-    alignas(32) int32 seed_ids[64];
     alignas(32) int32 seed_ranks[128];
-    alignas(32) int32 nearest[20*shortlist::size];
     alignas(32) int32 labels[20];
     prepare_density(reinterpret_cast<const int8*>(hits->ptr),
                     reinterpret_cast<const int8*>(landmarks->ptr), cache, counts);
     const unsigned id = getPacketid(output, 0);
     writeHeader(output, 0, id);
     for (unsigned r=0; r<32; ++r) writeincr(output, int32(counts[r]), r==31);
-    // Overlap shortlist preparation with PL selection, after emitting densities.
     chess_separator_scheduler();
-    shortlist::prepare(cache,nearest);
+    assignment::prepare(cache);
     for(unsigned s=0;s<128;s+=16)
-        aie::store_v(seed_ranks+s,aie::broadcast<int32,16>(127));
+        aie::store_v(seed_ranks+s,aie::broadcast<int32,16>(assignment::unselected));
     chess_separator_scheduler();
     readincr(control); // packet header
     const unsigned count=unsigned(readincr(control));
-    for (unsigned word=0; word<(count+3)/4; ++word) {
+    // Full words need neither a seed-ID copy nor four per-lane bounds checks.
+    for (unsigned word=0; word<count/4; ++word) {
         const uint32_t packed=uint32_t(readincr(control));
-        for (unsigned lane=0; lane<4; ++lane) {
-            seed_ids[word*4+lane]=(packed>>(lane*8))&127;
-            if(word*4+lane<count) seed_ranks[seed_ids[word*4+lane]]=word*4+lane;
-        }
+        seed_ranks[packed&127]=word*4;
+        seed_ranks[(packed>>8)&127]=word*4+1;
+        seed_ranks[(packed>>16)&127]=word*4+2;
+        seed_ranks[(packed>>24)&127]=word*4+3;
+    }
+    const unsigned remainder=count&3;
+    if(remainder) {
+        const uint32_t packed=uint32_t(readincr(control));
+        const unsigned first=count-remainder;
+        seed_ranks[packed&127]=first;
+        if(remainder>1) seed_ranks[(packed>>8)&127]=first+1;
+        if(remainder>2) seed_ranks[(packed>>16)&127]=first+2;
     }
     chess_separator_scheduler();
-    for (unsigned h=0; h<5; ++h) {
-        bool fallback=false;
-        for(unsigned lane=0;lane<4;++lane) {
-            const int label=shortlist::lookup(nearest+(h*4+lane)*32,seed_ranks);
-            labels[h*4+lane]=label;
-            fallback|=label<0;
-        }
-        if(!fallback) continue;
-        // One unresolved lane invokes the original vector scan for four hits.
-        V4 best=aie::broadcast<int32,4>(0x7fffffff);
-        V4 label=aie::zeros<int32,4>();
-        // Avoid the compiler's serial short-trip loop for 1-3 seeds.
-        if(count<4) {
-            for(unsigned s=0;s<3;++s) chess_unroll_loop(3) {
-                if(s<count) update_label(cache+h*512,seed_ids[s],s,best,label);
-            }
-        } else {
-            for(unsigned s=0;s<count;++s) chess_prepare_for_pipelining chess_loop_range(4,64)
-                update_label(cache+h*512,seed_ids[s],s,best,label);
-        }
-        aie::store_v(labels+h*4,label);
-    }
+    assignment::assign(cache,seed_ranks,labels);
     chess_separator_scheduler();
     writeHeader(output, 2, id);
     for (unsigned h=0; h<5; ++h) {
-        const uint32_t packed=uint32_t(labels[h*4])|(uint32_t(labels[h*4+1])<<8)
-                            |(uint32_t(labels[h*4+2])<<16)|(uint32_t(labels[h*4+3])<<24);
+        const uint32_t packed=(uint32_t(labels[h*4])&assignment::rank_mask)
+                            |((uint32_t(labels[h*4+1])&assignment::rank_mask)<<8)
+                            |((uint32_t(labels[h*4+2])&assignment::rank_mask)<<16)
+                            |((uint32_t(labels[h*4+3])&assignment::rank_mask)<<24);
         writeincr(output,int32(packed),h==4);
     }
 }

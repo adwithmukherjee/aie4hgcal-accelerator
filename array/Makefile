@@ -8,11 +8,12 @@ AIE_JOBS ?= 2
 DATA ?= $(HOME)/aie-landmark-benchmark-data/cluster-real-mixed
 PLATFORM ?= /opt/xilinx/platforms/xilinx_vck5000_gen4x8_qdma_2_202220_1/xilinx_vck5000_gen4x8_qdma_2_202220_1.xpfm
 NATIVE_EVENTS ?= 2
+ASSIGNMENT_CASES := $(shell PYTHONDONTWRITEBYTECODE=1 python3 -c 'import sys; sys.path.insert(0,"$(ROOT)/array/tools"); from assignment_cases import ASSIGNMENT_CASE_COUNT; print(ASSIGNMENT_CASE_COUNT)')
 SEED_MODE ?= normal
 export TMPDIR := $(BUILD)/tmp
 export PYTHONDONTWRITEBYTECODE := 1
 .DEFAULT_GOAL := aie
-.PHONY: configure aie codegen aie-sim aie-gate-test aie-cap-test aie-shortlist-test aie-force64-test seed-test rtl-test xo host link package emu pl-trace
+.PHONY: configure aie codegen aie-sim aie-gate-test aie-cap-test aie-assignment-test aie-shortlist-test aie-force64-test seed-test rtl-test xo host link package emu pl-trace
 configure:
 	mkdir -p $(BUILD)/tmp $(BUILD)/aie
 	python3 $(ROOT)/array/tools/configure.py $(BUILD) $(COLUMNS)
@@ -74,10 +75,12 @@ aie-cap-test:
 	cd $(BUILD)/aie && DENSITY_EVENTS=2 aiesimulator --pkg-dir=Work --output-dir=$(BUILD)/aie/native-cap --output-time-stamp=no > simulate-cap.log 2>&1
 	python3 $(ROOT)/array/tools/check_aie.py $(DATA) $(BUILD)/aie/native-cap $(BUILD)/config/packet_map.json --events 2 --assignment-count 64 --ties-last
 
-aie-shortlist-test:
-	python3 $(ROOT)/array/tools/make_input.py $(DATA) $(BUILD) --events 4 --assignment-cases
-	cd $(BUILD)/aie && DENSITY_EVENTS=4 aiesimulator --pkg-dir=Work --output-dir=$(BUILD)/aie/native-shortlist --output-time-stamp=no > simulate-shortlist.log 2>&1
-	python3 $(ROOT)/array/tools/check_aie.py $(DATA) $(BUILD)/aie/native-shortlist $(BUILD)/config/packet_map.json --events 4 --assignment-cases
+aie-shortlist-test: aie-assignment-test
+
+aie-assignment-test:
+	python3 $(ROOT)/array/tools/make_input.py $(DATA) $(BUILD) --events $(ASSIGNMENT_CASES) --assignment-cases
+	cd $(BUILD)/aie && DENSITY_EVENTS=$(ASSIGNMENT_CASES) aiesimulator --pkg-dir=Work --output-dir=$(BUILD)/aie/native-assignment --output-time-stamp=no > simulate-assignment.log 2>&1
+	python3 $(ROOT)/array/tools/check_aie.py $(DATA) $(BUILD)/aie/native-assignment $(BUILD)/config/packet_map.json --events $(ASSIGNMENT_CASES) --assignment-cases
 
 aie-force64-test:
 	python3 $(ROOT)/array/tools/make_input.py $(DATA) $(BUILD) --events 2 --force-64

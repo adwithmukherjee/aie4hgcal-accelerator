@@ -35,30 +35,43 @@ two coordinates per clock through subtraction, square, and accumulation stages.
 The seven-stage maximum tree then selects the best unsuppressed candidate; a
 synchronous table read supplies its suppression mask on the next clock. Selection
 waits for the current event table if densities arrive early. Every row is
-overwritten each event, and no precomputation is moved outside the timer. AIE
-prepares the nearest 32 landmarks per hit after emitting its density packet and
-before reading the seed packet. Native 32-bit compare/shuffle operations sort
-packed `(squared_distance << 7) | landmark_slot` keys; four sorted blocks of 32
-are merged while retaining only the nearest 32. A block is skipped only when its
-smallest packed key cannot enter the current nearest-32 set. The exact distance cache remains
-intact. Preparation is inside the timer and can overlap PL selection; any excess
-preparation time remains on the critical path.
+overwritten each event, and no precomputation is moved outside the timer.
 
-After seeds arrive, a 128-entry slot-to-label table supports an early-exit search
-through each shortlist. The entire nearest selected distance group is checked
-to preserve seed-order ties. A missing seed or a winner at the shortlist cutoff
-invokes the original four-hit vector scan, so an omitted equal-distance seed
-cannot change the answer. The slowest tile still determines full-event latency.
-The fallback uses unrolled 1–3-seed handling or the pipelined larger-seed loop.
-The native sorting and merging functions store intermediate halves explicitly
-in SRAM so separate networks can reuse AIE1 vector registers. Code-generation
-checks reject scalar shuffle helpers, unexpected calls, and spills inside those
-networks. They retain the 13-bundle density and 12-bundle fallback loop limits
-and report the preparation control code, including call and spill overhead.
+After emitting density counts, AIE scales the cached distances by 64 in place,
+initializes a 128-entry inverse seed-rank table, and reads the selected landmark
+slots. Scaling runs inside the timer while PL selects seeds. Its separate loop
+avoids register conflicts between AIE1's UPS/SRS conversion and a live vector
+minimum; any preparation beyond the overlap window remains on the critical path.
+Complete four-seed words are unpacked without per-lane bounds checks or a second
+seed-ID array; a separate
+tail handles one to three remaining seeds. The table is reset for every event.
+
+Assignment scans the existing cache in its four-hit by four-landmark layout.
+For each four-hit group, 32 vector iterations visit all 128 landmarks. Each lane
+forms `64*squared_distance + seed_rank`; unselected slots use `1<<30` in place
+of the rank. The maximum INT8 squared distance is `8*255*255 = 520200`, so all
+keys fit signed INT32 and every selected key is below every unselected key.
+A vector minimum therefore preserves exact distances and seed-order ties.
+Two lane-permuted reductions combine each hit's four lanes; the low six bits
+of each winning key are the output label. No sorting, shortlist, approximate
+arithmetic, or fallback path is used. Work is fixed at 160 vector blocks per
+tile for every supported seed count (1 through 64).
+
+Code-generation checks reject scalar shuffle helpers, unexpected calls, and
+spills in the density and assignment hot loops. Density retains its 13-bundle
+limit; scaling uses one bundle per eight distances, and the assignment
+scan is limited to four bundles per vector block. Separate outlined preparation
+and assignment functions isolate their vector-register lifetimes from density computation.
 The 20 KiB stack reservation is checked against the complete dispatcher, kernel,
-preparation, and network call chain using each tile’s linker map.
-All helper execution and SRAM traffic remain inside the same benchmark timer.
-No distance matrix is copied back to PL; the cache remains on AIE for assignment.
+and larger helper call path using each tile's map.
+These static schedule checks are not measured end-to-end latency results.
+All seed decoding, helper execution, memory traffic, and communication remain
+inside the same timer. No distance matrix is copied back to PL.
+
+The in-place scaling loop uses the [Vitis 2022.2 documented restricted-pointer
+idiom](https://docs.amd.com/r/2022.2-English/ug1079-ai-engine-kernel-coding/Restrict-Qualification?contentId=U_nFZA5f8HaCwIfZdXEbjQ)
+to allow the next vector load to overlap an earlier vector's store. Each vector
+is read once before replacement, and iterations access disjoint elements.
 
 ## Forced 64-seed latency benchmark
 
@@ -100,7 +113,7 @@ python3 array/tools/clustering_reference.py "$DATA" "$DATA"
 python3 array/tools/clustering_reference.py "$DATA" "$DATA" --force-64
 make -f array/Makefile seed-test rtl-test host xo
 make -f array/Makefile aie
-make -f array/Makefile aie-gate-test aie-shortlist-test aie-sim aie-force64-test
+make -f array/Makefile aie-gate-test aie-assignment-test aie-sim aie-force64-test
 make -f array/Makefile link package
 make -f array/Makefile emu pl-trace
 # Or stress exactly 64 selected seeds on the same real inputs:
@@ -114,9 +127,12 @@ duplicate landmarks, zero densities, 64-seed saturation, and repeated events.
 The RTL system test checks independent backpressure, skew, reverse tile return
 order, seeds, seed identities, labels, load guards, and the exact final-write
 counter endpoint. Native AIE tests cover real event-derived seeds, withholding
-seed packets, and 64 supplied seed IDs on real embeddings plus a synthetic all-tied event. The shortlist qualification also covers an empty shortlist intersection, a
-winning tie outside the cutoff, seed-order ties inside the shortlist, and signed
-INT8 extremes. `aie-force64-test` checks the real density-ranked 64-seed lists
+seed packets, and 64 supplied seed IDs on real embeddings plus a synthetic all-tied event. The assignment qualification covers 18 consecutive synthetic events, including
+unselected nearest landmarks, both seed-order tie cases, signed INT8 extremes,
+and unselected distance zero versus the maximum selected distance. Seed counts
+1, 2, 3, 4, 5, 15, 16, 17, 31, 32, 33, 63, and 64 exercise packet tails and
+rank-table reset across changing seed sets. The old `aie-shortlist-test` target
+is an alias for `aie-assignment-test`. `aie-force64-test` checks the real density-ranked 64-seed lists
 against the CPU oracle, outside the integrated performance run. Native checks
 establish correctness; their timestamps are not the PL-to-PL benchmark.
 The integrated host independently computes every final output using scalar CPU
