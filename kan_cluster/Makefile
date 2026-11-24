@@ -13,6 +13,9 @@ $(error TARGET must be hw or hw_emu)
 endif
 AIE_ARCHIVE ?= $(HOME)/aie-landmark-benchmark-runs/vector-assignment-20261118-4254658
 PLATFORM ?= /opt/xilinx/platforms/xilinx_vck5000_gen4x8_qdma_2_202220_1/xilinx_vck5000_gen4x8_qdma_2_202220_1.xpfm
+ifeq ($(TARGET):$(notdir $(PLATFORM)),hw:xilinx_vck5000_gen4x8_qdma_2_202220_1.xpfm)
+PARTPIN_OPT := --vivado.prop "run.impl_1.STEPS.PLACE_DESIGN.TCL.PRE=$(ROOT)/axi_partition_pin.tcl"
+endif
 RTL := $(BUILD)/generated/kan_lane.sv $(SOURCE)/kan/stream.sv $(SOURCE)/kan/register_bank.sv $(SOURCE)/kan/event.sv $(SOURCE)/array/seed_select.sv $(ROOT)/column.sv $(ROOT)/control.sv
 .PHONY: generate rtl-test configure stage-aie xo host link package emu verify hardware resource-check
 generate:
@@ -23,7 +26,7 @@ rtl-test: resource-check
 	mkdir -p $(BUILD)/rtl-test
 	cp $(BUILD)/generated/*.mem $(BUILD)/rtl-test/
 	cd $(BUILD)/rtl-test && xvlog --sv $(RTL) $(ROOT)/testbench.sv > compile.log 2>&1
-	cd $(BUILD)/rtl-test && xelab --mt 2 kan_cluster_tb -s kan_cluster_tb --debug typical > elaborate.log 2>&1
+	cd $(BUILD)/rtl-test && xelab --mt 2 -generic_top CAPTURE_EMBEDDINGS=$(if $(filter hw,$(TARGET)),0,1) kan_cluster_tb -s kan_cluster_tb --debug typical > elaborate.log 2>&1
 	cd $(BUILD)/rtl-test && xsim kan_cluster_tb -runall --testplusarg DATA=$(DATA) > test.log 2>&1
 	grep 'PASS: 64-lane KAN to four-column streaming RTL' $(BUILD)/rtl-test/test.log
 configure:
@@ -38,7 +41,7 @@ host:
 	g++ -std=c++17 -O2 -Wall -Wextra -I/opt/xilinx/xrt/include $(ROOT)/host.cpp -L/opt/xilinx/xrt/lib -lxrt_coreutil -ldl -o $(BUILD)/kan_cluster_host
 link: resource-check
 	mkdir -p $(BUILD)/system $(BUILD)/tmp
-	cd $(BUILD)/system && v++ -l -g --save-temps -t $(TARGET) --platform $(PLATFORM) --kernel_frequency 300 --config $(BUILD)/config/connectivity.cfg --temp_dir link -o integrated.xsa $(BUILD)/kan_cluster_pl.xo $(BUILD)/libadf.a > link.log 2>&1
+	cd $(BUILD)/system && v++ -l -g --save-temps -t $(TARGET) --platform $(PLATFORM) --kernel_frequency 300 --config $(BUILD)/config/connectivity.cfg $(PARTPIN_OPT) --temp_dir link -o integrated.xsa $(BUILD)/kan_cluster_pl.xo $(BUILD)/libadf.a > link.log 2>&1
 ifeq ($(TARGET),hw_emu)
 	$(PYTHON) $(SOURCE)/tools/capture_clock.py $(BUILD)
 endif

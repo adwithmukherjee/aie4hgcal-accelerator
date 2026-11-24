@@ -49,6 +49,22 @@ module seed_select (
   assign row_mask[i]=squared[i]<20'd3267;
   assign remaining[i]=active[i] && (forced || !suppress[i]) && i!=chosen;
  end endgenerate
+ // The low two bytes feed every subtractor. Load a complete row on the
+ // preceding mask-write edge, then shift the next pair into place each clock.
+ // Limit the fanout of reference bits shared by all 128 subtractors.
+ (* max_fanout=32 *) reg [63:0] reference_coords;
+ reg [6:0] next_reference_row;
+ always @(posedge clk) begin
+  if(prepare) begin
+   reference_coords<=landmarks[63:0];
+   next_reference_row<=1;
+  end else if(preparing) begin
+   if(phase==6) begin
+    reference_coords<=landmarks[next_reference_row*64+:64];
+    next_reference_row<=next_reference_row+1'b1;
+   end else if(phase<3) reference_coords<=reference_coords>>16;
+  end
+ end
  integer i,p;
  always @(posedge clk) begin
   if(!rst_n) begin preparing<=0;masks_ready<=0;prep_row<=0;phase<=0;end
@@ -58,9 +74,9 @@ module seed_select (
   end else if(preparing) begin
    if(phase<4) for(p=0;p<128;p=p+1) begin
     delta0[p]<=$signed({landmarks[p*64+phase*16+7],landmarks[p*64+phase*16+:8]})
-                -$signed({landmarks[prep_row*64+phase*16+7],landmarks[prep_row*64+phase*16+:8]});
+                -$signed({reference_coords[7],reference_coords[7:0]});
     delta1[p]<=$signed({landmarks[p*64+phase*16+15],landmarks[p*64+phase*16+8+:8]})
-                -$signed({landmarks[prep_row*64+phase*16+15],landmarks[prep_row*64+phase*16+8+:8]});
+                -$signed({reference_coords[15],reference_coords[15:8]});
    end
    if(phase>=1 && phase<=4) for(p=0;p<128;p=p+1) begin
     square0[p]<=delta0[p]*delta0[p];square1[p]<=delta1[p]*delta1[p];
@@ -79,13 +95,35 @@ module seed_select (
  always @(posedge clk)
   if(state==PICK && wait_cycles==0 && masks_ready && tree[1][17])
    suppress<=too_close[7'd127-tree[1][6:0]];
+ // Each root child covers 64 slots. Fetch its finalist ID on the
+ // same clock that the root chooses between the two children.
+ wire [31:0] finalist_id[0:1];
+ for(genvar half=0;half<2;half=half+1) begin: finalist_lookup
+  wire [5:0] slot=~tree[2+half][5:0];
+  reg [31:0] id;
+  always @(posedge clk) id<=landmark_hit_ids[(half*64+slot)*32+:32];
+  assign finalist_id[half]=id;
+ end
+ // Arm the destination in the last countdown cycle. Keep it armed if
+ // geometry is late, then disarm as soon as PICK can retire.
+ wire arm_destination=rst_n && !start && state==PICK &&
+                      (wait_cycles==1 || (wait_cycles==0 && !masks_ready));
+ for(genvar dest=0;dest<64;dest=dest+1) begin: seed_ids
+  reg selected;
+  always @(posedge clk) selected<=arm_destination && seed_count==dest;
+  always @(posedge clk) begin
+   if(!rst_n || start) seed_hit_ids[dest*32+:32]<=0;
+   else if(selected && masks_ready && tree[1][17])
+    seed_hit_ids[dest*32+:32]<=finalist_id[~tree[1][6]];
+  end
+ end
  always @(posedge clk) begin
   if(!rst_n) begin
-   state<=IDLE;done<=0;overflow<=0;seed_count<=0;seed_slots<=0;seed_hit_ids<=0;
+   state<=IDLE;done<=0;overflow<=0;seed_count<=0;seed_slots<=0;
    active<=0;wait_cycles<=0;chosen<=0;maximum<=0;forced<=0;
   end else if(start) begin
    state<=INITIAL;active<=~128'b0;wait_cycles<=7;done<=0;overflow<=0;
-   seed_count<=0;seed_slots<=0;seed_hit_ids<=0;
+   seed_count<=0;seed_slots<=0;
    forced<=force_64;
   end else case(state)
    INITIAL: if(wait_cycles!=0) wait_cycles<=wait_cycles-1;
@@ -100,15 +138,16 @@ module seed_select (
     else begin
      chosen<=~tree[1][6:0];
      seed_slots[seed_count*8+:8]<={1'b0,~tree[1][6:0]};
-     seed_hit_ids[seed_count*32+:32]<=landmark_hit_ids[(7'd127-tree[1][6:0])*32+:32];
      seed_count<=seed_count+1;
      state<=SUPPRESS;
     end
    SUPPRESS: begin
     active<=remaining;
+    // Reload for the next pick. START initializes the counter after a terminal pick.
+    wait_cycles<=7;
     if(seed_count==64 || remaining==0) begin
      done<=1;overflow<=seed_count==64 && remaining!=0;state<=IDLE;
-    end else begin wait_cycles<=7;state<=PICK;end
+    end else state<=PICK;
    end
    default:;
   endcase

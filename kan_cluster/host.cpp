@@ -43,7 +43,8 @@ int main(int argc,char** argv) {
   const fs::path fixture=fs::path(argv[2])/"event-00187",config=argv[3],results=argv[4];
   auto raw=binary_words(fixture/"wire.bin",8000),roles=binary_words(fixture/"roles.bin",768);
   auto landmark_ids=binary_words(fixture/"landmark_ids.bin",128);
-  auto expected=hex_words(fixture/"expected.mem",8000);
+  std::vector<uint64_t> expected;
+  if(emulation) expected=hex_words(fixture/"expected.mem",8000);
   auto headers=binary_words(config/"route_headers.bin",40),ids=binary_words(config/"output_ids.bin",32);
   fs::create_directories(results);
   xrt::device device(0);auto uuid=device.load_xclbin(argv[1]);
@@ -109,24 +110,26 @@ int main(int argc,char** argv) {
     for(unsigned i=0;i<v.size();++i) if(v[i]!=cluster[offset+i]) throw std::runtime_error(std::string(what)+" mismatch at "+std::to_string(i));
    };
    check(density,0,"density");check(slots,130,"seed slot");check(seed_ids,146,"seed ID");check(labels,210,"label");
-   std::vector<uint64_t> embeddings(8000);
-   if(sim_memory) {
-    embeddings=hex_words(results/("capture-"+std::to_string(trial)+".mem"),8000);
-    for(unsigned i:{0u,1u,63u,64u,127u,128u,767u,768u,7999u}) {
-     uint64_t value=0;
-     if(br(handle,XCL_ADDR_KERNEL_CTRL,base+0x10000+i*8,&value,8)!=8 || value!=embeddings[i])
-      throw std::runtime_error("AXI capture spot check differs from simulator RAM read");
-    }
-   } else if(br(handle,XCL_ADDR_KERNEL_CTRL,base+0x10000,embeddings.data(),8000*8)!=8000*8) throw std::runtime_error("Embedding readback failed");
-   if(embeddings!=expected) throw std::runtime_error("Full-event embedding mismatch");
-   save(results/("embeddings-"+std::to_string(trial)+".bin"),embeddings);
+   if(emulation) {
+    std::vector<uint64_t> embeddings(8000);
+    if(sim_memory) {
+     embeddings=hex_words(results/("capture-"+std::to_string(trial)+".mem"),8000);
+     for(unsigned i:{0u,1u,63u,64u,127u,128u,767u,768u,7999u}) {
+      uint64_t value=0;
+      if(br(handle,XCL_ADDR_KERNEL_CTRL,base+0x10000+i*8,&value,8)!=8 || value!=embeddings[i])
+       throw std::runtime_error("AXI capture spot check differs from simulator RAM read");
+     }
+    } else if(br(handle,XCL_ADDR_KERNEL_CTRL,base+0x10000,embeddings.data(),8000*8)!=8000*8) throw std::runtime_error("Embedding readback failed");
+    if(embeddings!=expected) throw std::runtime_error("Full-event embedding mismatch");
+    save(results/("embeddings-"+std::to_string(trial)+".bin"),embeddings);
+   }
    save(results/("labels-"+std::to_string(trial)+".bin"),labels);
    save(results/("density-"+std::to_string(trial)+".bin"),density);
    if(trial) report<<",\n";
    report<<"{\"trial\":"<<trial<<",\"event\":187,\"force64\":"<<(trial?"true":"false")
          <<",\"encoder_cycles\":137,\"final_cycles\":"<<cycles<<",\"seeds\":"<<seeds
-         <<",\"verified_embeddings\":8000,\"verified_labels\":640}";report.flush();
-   std::cout<<"PASS integrated trial="<<trial<<" cycles="<<cycles<<" encoder=137 seeds="<<seeds<<" embeddings=8000 labels=640"<<std::endl;
+         <<",\"verified_embeddings\":"<<expected.size()<<",\"verified_labels\":640}";report.flush();
+   std::cout<<"PASS integrated trial="<<trial<<" cycles="<<cycles<<" encoder=137 seeds="<<seeds<<" verified_embeddings="<<expected.size()<<" labels=640"<<std::endl;
   }
 #pragma GCC diagnostic pop
   report<<"\n]}\n";report.close();

@@ -1,9 +1,8 @@
 # Streaming PL KAN into the 32-tile AIE clusterer
 
 This experiment joins the [64-lane integer KAN](../kan/README.md) to the
-existing [four-column AIE clusterer](../array/README.md). Each release computes
-8,000 four-byte raw input slots in PL, captures all 8,000 eight-byte embeddings,
-and streams 640 hit embeddings plus 128 landmark embeddings into 32 AIE workers.
+existing [four-column AIE clusterer](../array/README.md). Each release encodes
+8,000 four-byte raw input slots in PL and streams 640 hit embeddings plus 128 landmark embeddings into 32 AIE workers.
 Inputs are raw features, identities and routing metadata; no embeddings are
 uploaded. This is a fixed-size first integration experiment.
 
@@ -20,15 +19,27 @@ then the rest of the event. An explicit inverse map restores the original
 640-hit order at the packetizers and original hit identities at seed selection.
 A hit that is also a landmark is encoded once and read by both roles.
 
-The 64-lane encoder has no dependency on downstream ready. Its full-event output
-is captured in 64 banks. Only the first 768 slots are additionally replicated
-into four independently read column caches, with one write and one read per
+The 64-lane encoder has no dependency on downstream ready. The emulation build
+captures all outputs in 64 banks for host validation. Both build targets copy
+the first 768 slots into four independently read column caches, with one write and one read per
 bank. A 12-bit availability vector releases each 64-slot group as it arrives.
 The first column payload can therefore leave before the last embedding exists.
 The cache also lets AIE backpressure extend communication without stalling or
 discarding the remaining encodings.
 
-Each memory read fetches two complete eight-byte embeddings. A one-word
+Raw loading captures the accepted hit and index, then registers the bank
+selection alongside the row and data. The selected bank captures the row and
+data and issues a registered word strobe. The final hit commits four clocks
+after acceptance. An immediately following AXI START waits for that commit.
+The receive side of each packet column buffers one accepted beat before
+decoding its density or label update and accepts consecutive beats. At event start,
+each column registers a local density clear. It clears the counters on the next
+edge, when the receiver can accept its first beat. Completion
+occurs when the final label is written from that buffer.
+
+The packetizer registers the selected banks, row addresses and packet metadata
+one cycle before the synchronous prefix read. Each pair contains two eight-byte
+embeddings. A one-word
 gearbox packs the header with the first three payload words, then carries the
 fourth word into the next beat. Every interior PLIO beat is full width; only
 the last beat is partial. Two arbitrary hit sources that share a bank use an
@@ -37,14 +48,20 @@ holds data, keep and last stable under backpressure. Broadcast landmarks are
 contiguous and use different banks within each pair.
 
 PL seed geometry preparation begins after both landmark groups are available.
+Each row’s reference coordinates are ready a clock before subtraction. Loading
+the next row on the mask-write edge preserves the seven-clock row cadence.
 The existing two-stage density reduction, seed selector, AIE distance cache
 and exact assignment are unchanged. Normal seed selection and the forced
 64-seed stress mode use the previous clustering thresholds and identity rules.
 The compiled AIE archive and its packet routes are verified against the
 provenance manifest at commit `42546581b4cbf7ac4db8fc55b7284ba2b0363b50`.
 
-The global timer starts when raw-register release is accepted and stops on the
-last AIE label capture, after all 8,000 embeddings have been captured. This
+The encoder and global timer start when raw-register release is accepted. Each
+packet column consumes a local registered start pulse one clock later. A column
+reports zero completion flags, beat counters and tile masks during that clock.
+AXI landmark ID writes stage the 32-bit ID and its word enable together.
+The global timer stops on the
+last AIE label capture, after the encoder has produced all 8,000 embeddings. This
 includes KAN evaluation, landmark gathering, all streaming, PL seed geometry,
 density reduction and seed selection, AIE computation, and return traffic.
 Raw loading, fixed landmark sampling, raw ordering and host readback are outside
@@ -62,12 +79,14 @@ independent integer KAN and clustering references outside the repository.
 Event 187 contains 8,222 real hits; the fixture encodes 8,000 distinct real hits
 including every required hit and landmark. Event 393 contains 7,793 real hits;
 its last 207 slots are explicitly zero padded and are not sent to AIE. Native
-RTL validation uses both events in both seed modes. The full platform host uses
-event 187 in both modes and reads back all 8,000 embeddings on each release.
+RTL validation uses both events in both seed modes. The platform host uses
+event 187 in both modes, with full embedding readback enabled in emulation.
 These are functional and latency experiments, not a new clustering-quality or
 F1 evaluation on 8,000 clustered hits.
 
 ## Qualified hardware-emulation results
+
+These measurements precede the pipelined raw loader, packet receiver and AXI readback.
 
 VCK5000, Vitis/XRT 2022.2; waveform-verified 300 MHz PL and generated 1 GHz AIE
 model. Event 187, with 8,000 distinct real raw hits encoded and 640 hits clustered:
@@ -190,12 +209,18 @@ terminate the build if allocation grows faster than the watchdog can react.
 
 The host supports physical execution with `XCL_EMULATION_MODE` and
 `KAN_CLUSTER_SIM_MEMORY` unset. That path uses the physical XRT backend and full
-AXI loading/readback, with no simulator memory access. Physical execution is
+AXI input loading and clustering-result readback. Full embedding capture is
+compiled out for this target. The host checks densities, seeds and labels
+and reports zero verified embeddings. Physical execution is
 still unqualified until run on a matching card-equipped host.
 
 ## Control map
 
 The kernel is user managed with an 18-bit, 256 KiB AXI-Lite aperture.
+
+The read response becomes valid four clocks after the AXI read-address
+handshake. Large result windows select local words first and retain byte-offset
+reads across word and column boundaries. RDATA remains stable until RREADY.
 
 | Offset | Purpose |
 |---|---|
@@ -204,7 +229,7 @@ The kernel is user managed with an 18-bit, 256 KiB AXI-Lite aperture.
 | `0x0008`, `0x000c` | Lane count 64; raw slot count 8,000 |
 | `0x0010`, `0x0014` | Global elapsed cycles, low/high |
 | `0x0018` | Encoder elapsed cycles |
-| `0x001c`, `0x0020`, `0x0024` | Raw words loaded; roles loaded; embeddings captured |
+| `0x001c`, `0x0020`, `0x0024` | Raw words loaded; roles loaded; embeddings produced |
 | `0x0028`, `0x002c` | Completed column density/label masks |
 | `0x0034`, `0x0038` | Signature `0x4b434c31`; squared density radius 645 |
 | `0x003c`, `0x0040` | Seed count/overflow; forced-64 mode |
@@ -217,13 +242,17 @@ The kernel is user managed with an 18-bit, 256 KiB AXI-Lite aperture.
 | `0x3000` | 128 uint32 original landmark IDs, configured before release |
 | `0x4000 + c*0x400` | 128 partial uint32 densities |
 | `0x8000` | Sequential 8,000-word raw load aperture |
-| `0x10000` | 8,000 captured uint64 embeddings, readable after completion |
+| `0x10000` | Emulation only. Read 8,000 captured uint64 embeddings after completion |
 | `0x20000` | Sequential 768-word role map |
 
 A role word contains hit index in bits 9:0, landmark slot in bits 16:10, hit
 present in bit 17 and landmark present in bit 18. Upper bits must be zero.
 The first 128 words identify the corresponding landmark slots. Every hit and
-landmark role must occur exactly once before a release is accepted. Route
+landmark role must occur exactly once before a release is accepted. The controller
+performs a banked duplicate lookup and validates each role write in two
+configuration clocks before committing the bitmaps, column map,
+and AXI response together. It registers completeness in 32-bit groups, then combines them with the role count.
+Both stages finish before the earliest AXI START following the last role write. Route
 configuration can be reused between events; clearing raw loading requires
 reloading role and landmark identities. Releasing the same resident raw event
 again supports changing the seed mode without a reload.

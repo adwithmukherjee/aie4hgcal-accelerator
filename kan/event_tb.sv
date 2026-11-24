@@ -2,7 +2,7 @@
 `ifndef TEST_LANES
 `define TEST_LANES 1
 `endif
-module event_tb;
+module event_tb #(parameter bit PIPELINE_WRITE=0);
  localparam P=`TEST_LANES;
  reg clk=0,rst_n=0,clear=0,lv=0,sv=0,orr=0;
  reg [31:0] hit=0;
@@ -13,7 +13,7 @@ module event_tb;
  wire [P*64-1:0] emb;
  wire [12:0] id;
  wire [P-1:0] mask;
- kan_event #(.LANES(P)) dut(clk,rst_n,clear,lv,lr,hit,sv,sr,count,
+ kan_event #(.LANES(P),.PIPELINE_WRITE(PIPELINE_WRITE)) dut(clk,rst_n,clear,lv,lr,hit,sv,sr,count,
   busy,done,cycles,loaded,ov,orr,emb,id,mask,ol);
  always #5 clk=~clk;
  reg [31:0] x[0:7999];reg [63:0] y[0:7999];
@@ -39,7 +39,14 @@ module event_tb;
     @(posedge clk);if(!lr) $fatal(1,"load blocked");
     @(negedge clk);
    end
-   lv=0;offset=off;
+   lv=0;offset=off;count=size;#1;
+   if(PIPELINE_WRITE) begin
+    repeat(4) begin
+     if(sr) $fatal(1,"start_ready asserted with a raw write in flight");
+     @(negedge clk);
+    end
+    if(!sr) $fatal(1,"start_ready held after last raw write committed");
+   end
    if(loaded!=size) $fatal(1,"load count");
   end
  endtask

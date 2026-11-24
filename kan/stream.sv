@@ -2,7 +2,8 @@
 // A group can be replicated independently: no global event-wide serializer.
 // Lowest byte is coordinate 0; lane l is hit base_id+l when lane_mask[l].
 module kan_stream #(
- parameter integer LANES=1, ID_WIDTH=13
+ parameter integer LANES=1, ID_WIDTH=13,
+ parameter bit GATE_IDLE=1
 )(
  input wire clk, rst_n,
  input wire in_valid, output wire in_ready,
@@ -20,7 +21,9 @@ module kan_stream #(
  reg [LANES-1:0] masks[0:STAGES-1];
  reg [STAGES-1:0] last;
  wire advance=!valid[STAGES-1] || out_ready;
- wire run=advance && (in_valid || (|valid));
+ // The integrated sink is continuously ready. Disabling idle gating there
+ // lets synthesis tie every lane CE high while valid bits mark bubbles.
+ wire run=advance && (!GATE_IDLE || in_valid || (|valid));
  assign in_ready=rst_n && advance;
  assign out_valid=rst_n && valid[STAGES-1];
  assign out_base_id=ids[STAGES-1];
